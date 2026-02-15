@@ -41,8 +41,7 @@ const authorizeRoles = (...roles) => {
 };
 
 const checkPrivacy = (req, res, next) => {
-    // This is a placeholder. Logic depends on specific resource privacy fields.
-    // Usually implemented inside controllers or specific resource middlewares
+    // Deprecated: Privacy check is now handled explicitly in controllers using utils/securityGuard.js
     next();
 };
 

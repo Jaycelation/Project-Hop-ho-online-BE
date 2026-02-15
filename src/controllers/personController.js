@@ -1,7 +1,9 @@
 const Person = require("../models/PersonModel");
 const Relationship = require("../models/RelationshipModel");
+const mongoose = require("mongoose");
 const { success, error } = require("../utils/responseHandler");
 const logAudit = require("../utils/auditLogger");
+const securityGuard = require("../utils/securityGuard");
 
 // Create Person
 exports.createPerson = async (req, res) => {
@@ -102,7 +104,12 @@ exports.getPerson = async (req, res) => {
         if (!person) {
             return error(res, { code: "PERSON_NOT_FOUND", message: "Person not found" }, 404);
         }
-        // TODO: check privacy vs user role
+
+        const hasAccess = await securityGuard.checkPrivacy(person, req.user);
+        if (!hasAccess) {
+            return error(res, { code: "FORBIDDEN_PRIVATE_RESOURCE", message: "You do not have access to this person" }, 403);
+        }
+
         return success(res, person);
     } catch (err) {
         return error(res, err);
@@ -134,46 +141,42 @@ exports.listPersons = async (req, res) => {
 };
 
 // Get Tree (Ancestors and Descendants)
-// Simplified implementation
+// Simplified implementation: returns immediate parents/children/spouses.
+// (depth/includeSpouses/format are handled in /ancestors and /descendants endpoints in this codebase)
 exports.getTree = async (req, res) => {
     try {
         const { id } = req.params;
-        // Fetch the person
+
         const root = await Person.findById(id);
-        if (!root) return error(res, { code: "PERSON_NOT_FOUND" }, 404);
+        if (!root) {
+            return error(res, { code: "PERSON_NOT_FOUND", message: "Person not found" }, 404);
+        }
 
-        // Fetch ancestors (parents)
-        // Relationship where toPersonId = id AND type = 'parent_of' -> NO.
-        // 'parent_of': fromPerson is Parent, toPerson is Child.
-        // So to find parents of 'id', find Relationship where toPersonId == id AND type == 'parent_of'.
-        // fromPersonId will be the parent.
+        const hasAccess = await securityGuard.checkPrivacy(root, req.user);
+        if (!hasAccess) {
+            return error(
+                res,
+                { code: "FORBIDDEN_PRIVATE_RESOURCE", message: "You do not have access to this person" },
+                403
+            );
+        }
 
+        // Parents: rel where toPersonId = child, fromPersonId = parent
         const parentRels = await Relationship.find({ toPersonId: id, type: "parent_of" }).populate("fromPersonId");
         const parents = parentRels.map(r => r.fromPersonId);
 
-        // Fetch descendants (children)
-        // Relationship where fromPersonId == id AND type == 'parent_of'.
-        // toPersonId will be the child.
+        // Children: rel where fromPersonId = parent, toPersonId = child
         const childRels = await Relationship.find({ fromPersonId: id, type: "parent_of" }).populate("toPersonId");
         const children = childRels.map(r => r.toPersonId);
 
-        // Spouses directly?
-        // type = 'spouse_of'.
+        // Spouses
         const spouseRels = await Relationship.find({
-            $or: [
-                { fromPersonId: id, type: "spouse_of" },
-                { toPersonId: id, type: "spouse_of" }
-            ]
+            type: "spouse_of",
+            $or: [{ fromPersonId: id }, { toPersonId: id }]
         }).populate("fromPersonId toPersonId");
+        const spouses = spouseRels.map(r => (r.fromPersonId._id.toString() === id ? r.toPersonId : r.fromPersonId));
 
-        const spouses = spouseRels.map(r => r.fromPersonId._id.equals(id) ? r.toPersonId : r.fromPersonId);
-
-        return success(res, {
-            root,
-            parents,
-            children,
-            spouses
-        });
+        return success(res, { root, parents, children, spouses });
     } catch (err) {
         return error(res, err);
     }

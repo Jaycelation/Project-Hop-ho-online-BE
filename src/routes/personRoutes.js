@@ -15,6 +15,12 @@ router.get("/:id/tree", verifyToken, personController.getTree);
 // Details
 router.get("/:id", verifyToken, personController.getPerson);
 
+// Ancestors
+router.get("/:id/ancestors", verifyToken, personController.getAncestors);
+
+// Descendants
+router.get("/:id/descendants", verifyToken, personController.getDescendants);
+
 // Update (EDITOR+)
 router.put("/:id", verifyToken, authorizeRoles("admin", "editor"), personController.updatePerson);
 

@@ -9,9 +9,9 @@
  */
 const sendResponse = (res, status, success, data = null, meta = null, error = null) => {
     const response = { success };
-    if (data) response.data = data;
-    if (meta) response.meta = meta;
-    if (error) response.error = error;
+    if (data !== null && data !== undefined) response.data = data;
+    if (meta !== null && meta !== undefined) response.meta = meta;
+    if (error !== null && error !== undefined) response.error = error;
 
     return res.status(status).json(response);
 };

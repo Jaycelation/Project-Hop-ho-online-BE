@@ -25,17 +25,19 @@ exports.createEvent = async (req, res) => {
 
 exports.listEvents = async (req, res) => {
     try {
-        const { branchId, personId, startDate, endDate } = req.query;
+        const { branchId, personId } = req.query;
+        const dateFrom = req.query.dateFrom || req.query.startDate;
+        const dateTo = req.query.dateTo || req.query.endDate;
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 20;
 
         let query = {};
         if (branchId) query.branchId = branchId;
         if (personId) query.personIds = personId;
-        if (startDate || endDate) {
+        if (dateFrom || dateTo) {
             query.eventDate = {};
-            if (startDate) query.eventDate.$gte = new Date(startDate);
-            if (endDate) query.eventDate.$lte = new Date(endDate);
+            if (dateFrom) query.eventDate.$gte = new Date(dateFrom);
+            if (dateTo) query.eventDate.$lte = new Date(dateTo);
         }
 
         const events = await Event.find(query)

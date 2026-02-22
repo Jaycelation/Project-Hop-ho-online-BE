@@ -1,5 +1,6 @@
 const User = require("../models/UserModel");
 const { success, error } = require("../utils/responseHandler");
+const logAudit = require("../utils/auditLogger");
 
 // Get current user profile
 exports.getMe = async (req, res) => {
@@ -17,13 +18,30 @@ exports.getMe = async (req, res) => {
 // Update current user profile
 exports.updateMe = async (req, res) => {
     try {
-        const { fullName } = req.body;
-        // Allows updating fullName, maybe avatar later if added to User model
+        const { fullName, phone, address, avatarUrl } = req.body;
+
+        const updateFields = {};
+        if (fullName !== undefined) updateFields.fullName = fullName;
+        if (phone !== undefined) updateFields.phone = phone;
+        if (address !== undefined) updateFields.address = address;
+        if (avatarUrl !== undefined) updateFields.avatarUrl = avatarUrl;
+
+        const originalUser = await User.findById(req.user.id).select("-passwordHash");
+
         const user = await User.findByIdAndUpdate(
             req.user.id,
-            { fullName },
+            updateFields,
             { new: true, runValidators: true }
         ).select("-passwordHash");
+
+        await logAudit({
+            actorId: req.user.id,
+            action: "UPDATE",
+            entityType: "User",
+            entityId: user._id,
+            before: originalUser,
+            after: user
+        }, req);
 
         return success(res, user);
     } catch (err) {
@@ -67,6 +85,8 @@ exports.updateUserRole = async (req, res) => {
             return error(res, { code: "INVALID_ROLE", message: "Invalid role" }, 400);
         }
 
+        const originalUser = await User.findById(id).select("-passwordHash");
+
         const user = await User.findByIdAndUpdate(
             id,
             { role },
@@ -76,6 +96,15 @@ exports.updateUserRole = async (req, res) => {
         if (!user) {
             return error(res, { code: "USER_NOT_FOUND", message: "User not found" }, 404);
         }
+
+        await logAudit({
+            actorId: req.user.id,
+            action: "UPDATE_ROLE",
+            entityType: "User",
+            entityId: user._id,
+            before: { role: originalUser?.role },
+            after: { role: user.role }
+        }, req);
 
         return success(res, user);
     } catch (err) {
@@ -87,7 +116,9 @@ exports.updateUserRole = async (req, res) => {
 exports.banUser = async (req, res) => {
     try {
         const { id } = req.params;
-        const { isBanned } = req.body; // Expect boolean
+        const { isBanned } = req.body;
+
+        const originalUser = await User.findById(id).select("-passwordHash");
 
         const user = await User.findByIdAndUpdate(
             id,
@@ -98,6 +129,15 @@ exports.banUser = async (req, res) => {
         if (!user) {
             return error(res, { code: "USER_NOT_FOUND", message: "User not found" }, 404);
         }
+
+        await logAudit({
+            actorId: req.user.id,
+            action: isBanned ? "BAN_USER" : "UNBAN_USER",
+            entityType: "User",
+            entityId: user._id,
+            before: { isBanned: originalUser?.isBanned },
+            after: { isBanned: user.isBanned }
+        }, req);
 
         return success(res, user);
     } catch (err) {

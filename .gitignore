@@ -3,3 +3,4 @@ node_modules/
 storage/uploads/*
 storage/transcoded/*
 .DS_Store
+*.zip

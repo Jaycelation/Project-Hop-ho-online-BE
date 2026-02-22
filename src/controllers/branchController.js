@@ -1,10 +1,9 @@
 const Branch = require("../models/BranchModel");
-const User = require("../models/UserModel"); // To verify user existence
+const User = require("../models/UserModel");
 const { success, error } = require("../utils/responseHandler");
+const logAudit = require("../utils/auditLogger");
 
 // List branches (MEMBER+)
-// Returns branches where user is owner, or is a member, or if user is ADMIN returns all? 
-// Requirements say MEMBER+. Usually means "My branches".
 exports.listBranches = async (req, res) => {
     try {
         const { role, id } = req.user;
@@ -14,11 +13,8 @@ exports.listBranches = async (req, res) => {
 
         let query = {};
         if (role === "admin") {
-            // Admin sees all? Or just their own? Usually Admin manages all.
-            // But for a list endpoint, maybe standard filtering.
-            // Let's assume Admin sees all for now, or we can filter by query params.
+            // Admin sees all
         } else {
-            // Members see branches they are part of or own
             query = {
                 $or: [
                     { ownerId: id },
@@ -55,8 +51,17 @@ exports.createBranch = async (req, res) => {
             name,
             description,
             ownerId: req.user.id,
-            members: [] // Start with no extra members
+            members: []
         });
+
+        await logAudit({
+            actorId: req.user.id,
+            action: "CREATE",
+            entityType: "Branch",
+            entityId: branch._id,
+            branchId: branch._id,
+            after: branch
+        }, req);
 
         return success(res, branch, null, 201);
     } catch (err) {
@@ -65,7 +70,6 @@ exports.createBranch = async (req, res) => {
 };
 
 // Get Branch Details (MEMBER+)
-// Check access: Owner, Member, or Admin
 exports.getBranch = async (req, res) => {
     try {
         const branch = await Branch.findById(req.params.id).populate("ownerId", "fullName email");
@@ -74,7 +78,7 @@ exports.getBranch = async (req, res) => {
             return error(res, { code: "BRANCH_NOT_FOUND", message: "Branch not found" }, 404);
         }
 
-        const isOwner = branch.ownerId.toString() === req.user.id;
+        const isOwner = branch.ownerId._id.toString() === req.user.id;
         const isMember = branch.members.some(m => m.userId.toString() === req.user.id);
         const isAdmin = req.user.role === "admin";
 
@@ -88,25 +92,35 @@ exports.getBranch = async (req, res) => {
     }
 };
 
-// Update Branch (ADMIN/EDITOR - typically Owner too)
+// Update Branch (ADMIN/EDITOR)
 exports.updateBranch = async (req, res) => {
     try {
-        // Permission check is usually done via middleware or here. 
-        // Requirements say ADMIN/EDITOR. I will assume Owner also should be allowed if they are EDITOR?
-        // Let's stick to requirements: ADMIN/EDITOR endpoint scope.
-        // We will assume the verifyToken + ensureRole middleware handles the "Editor+" part, 
-        // but we might want to check ownership if not admin?
-        // Req: "Auth ADMIN/EDITOR". Access control is strict.
+        const originalBranch = await Branch.findById(req.params.id);
+        if (!originalBranch) {
+            return error(res, { code: "BRANCH_NOT_FOUND", message: "Branch not found" }, 404);
+        }
+
+        // Only allow safe fields — prevent changing ownerId or members via this endpoint
+        const { name, description } = req.body;
+        const updateFields = {};
+        if (name !== undefined) updateFields.name = name;
+        if (description !== undefined) updateFields.description = description;
 
         const branch = await Branch.findByIdAndUpdate(
             req.params.id,
-            req.body,
+            updateFields,
             { new: true, runValidators: true }
         );
 
-        if (!branch) {
-            return error(res, { code: "BRANCH_NOT_FOUND", message: "Branch not found" }, 404);
-        }
+        await logAudit({
+            actorId: req.user.id,
+            action: "UPDATE",
+            entityType: "Branch",
+            entityId: branch._id,
+            branchId: branch._id,
+            before: originalBranch,
+            after: branch
+        }, req);
 
         return success(res, branch);
     } catch (err) {
@@ -121,6 +135,16 @@ exports.deleteBranch = async (req, res) => {
         if (!branch) {
             return error(res, { code: "BRANCH_NOT_FOUND", message: "Branch not found" }, 404);
         }
+
+        await logAudit({
+            actorId: req.user.id,
+            action: "DELETE",
+            entityType: "Branch",
+            entityId: branch._id,
+            branchId: branch._id,
+            before: branch
+        }, req);
+
         return success(res, { message: "Branch deleted" });
     } catch (err) {
         return error(res, err);
@@ -138,13 +162,11 @@ exports.addMember = async (req, res) => {
             return error(res, { code: "BRANCH_NOT_FOUND", message: "Branch not found" }, 404);
         }
 
-        // Check if user exists
         const userToAdd = await User.findById(userId);
         if (!userToAdd) {
             return error(res, { code: "USER_NOT_FOUND", message: "User to add not found" }, 404);
         }
 
-        // Check if already member
         const exists = branch.members.some(m => m.userId.toString() === userId);
         if (exists) {
             return error(res, { code: "CONFLICT_MEMBER_EXISTS", message: "User already in branch" }, 409);
@@ -152,6 +174,15 @@ exports.addMember = async (req, res) => {
 
         branch.members.push({ userId, roleInBranch: roleInBranch || "viewer" });
         await branch.save();
+
+        await logAudit({
+            actorId: req.user.id,
+            action: "ADD_MEMBER",
+            entityType: "Branch",
+            entityId: branch._id,
+            branchId: branch._id,
+            after: { addedUserId: userId, roleInBranch: roleInBranch || "viewer" }
+        }, req);
 
         return success(res, branch);
     } catch (err) {
@@ -170,8 +201,18 @@ exports.removeMember = async (req, res) => {
             return error(res, { code: "BRANCH_NOT_FOUND", message: "Branch not found" }, 404);
         }
 
+        const removedMember = branch.members.find(m => m.userId.toString() === userId);
         branch.members = branch.members.filter(m => m.userId.toString() !== userId);
         await branch.save();
+
+        await logAudit({
+            actorId: req.user.id,
+            action: "REMOVE_MEMBER",
+            entityType: "Branch",
+            entityId: branch._id,
+            branchId: branch._id,
+            before: { removedUserId: userId, member: removedMember }
+        }, req);
 
         return success(res, branch);
     } catch (err) {
@@ -179,8 +220,7 @@ exports.removeMember = async (req, res) => {
     }
 };
 
-// List Members (ADMIN/EDITOR) -> Actually MEMBER should probably see members too?
-// Req: "GET /api/branches/:id/members Auth ADMIN/EDITOR"
+// List Members (ADMIN/EDITOR)
 exports.listMembers = async (req, res) => {
     try {
         const branch = await Branch.findById(req.params.id).populate("members.userId", "fullName email");

@@ -2,6 +2,8 @@ const Media = require("../models/MediaModel");
 const path = require("path");
 const fs = require("fs");
 const { success, error } = require("../utils/responseHandler");
+const logAudit = require("../utils/auditLogger");
+const securityGuard = require("../utils/securityGuard");
 
 exports.uploadMedia = async (req, res) => {
     try {
@@ -21,19 +23,20 @@ exports.uploadMedia = async (req, res) => {
             originalName: req.file.originalname,
             mimeType: req.file.mimetype,
             sizeBytes: req.file.size,
-            storagePath: req.file.path, // Absolute path on disk
+            storagePath: req.file.path,
+            caption: caption || "",
             privacy: privacy || "internal",
             uploadedBy: req.user.id
         });
 
-        // If caption is needed, we might need to add it to schema or use separate metadata field?
-        // Schema doesn't have caption. Requirements mentions caption in upload fields.
-        // Checking MediaModel: No caption field. 
-        // I will ignore caption for now or if I could, I would add it. 
-        // Given I shouldn't modify models unless necessary, I'll skip storing caption in DB for now, or maybe it's implicitly handled elsewhere.
-        // Wait, requirements say "caption (optional)". I should add it to schema if I want to persist it.
-        // But for this task I will stick strictly to the existing schema provided in earlier steps.
-        // If the user didn't provide `caption` in the schema earlier, I won't add it now unless asked.
+        await logAudit({
+            actorId: req.user.id,
+            action: "CREATE",
+            entityType: "Media",
+            entityId: media._id,
+            branchId: media.branchId,
+            after: media
+        }, req);
 
         return success(res, media, null, 201);
     } catch (err) {
@@ -48,7 +51,13 @@ exports.uploadMedia = async (req, res) => {
 exports.getMedia = async (req, res) => {
     try {
         const media = await Media.findById(req.params.id);
-        if (!media) return error(res, { code: "NOT_FOUND" }, 404);
+        if (!media) return error(res, { code: "NOT_FOUND", message: "Media not found" }, 404);
+
+        const hasAccess = await securityGuard.checkPrivacy(media, req.user);
+        if (!hasAccess) {
+            return error(res, { code: "FORBIDDEN_PRIVATE_RESOURCE", message: "You do not have access to this media" }, 403);
+        }
+
         return success(res, media);
     } catch (err) {
         return error(res, err);
@@ -57,12 +66,33 @@ exports.getMedia = async (req, res) => {
 
 exports.updateMedia = async (req, res) => {
     try {
+        const originalMedia = await Media.findById(req.params.id);
+        if (!originalMedia) return error(res, { code: "NOT_FOUND", message: "Media not found" }, 404);
+
+        // Only allow safe fields to be updated
+        const { caption, privacy, personId, eventId } = req.body;
+        const updateFields = {};
+        if (caption !== undefined) updateFields.caption = caption;
+        if (privacy !== undefined) updateFields.privacy = privacy;
+        if (personId !== undefined) updateFields.personId = personId;
+        if (eventId !== undefined) updateFields.eventId = eventId;
+
         const media = await Media.findByIdAndUpdate(
             req.params.id,
-            req.body,
-            { new: true }
+            updateFields,
+            { new: true, runValidators: true }
         );
-        if (!media) return error(res, { code: "NOT_FOUND" }, 404);
+
+        await logAudit({
+            actorId: req.user.id,
+            action: "UPDATE",
+            entityType: "Media",
+            entityId: media._id,
+            branchId: media.branchId,
+            before: originalMedia,
+            after: media
+        }, req);
+
         return success(res, media);
     } catch (err) {
         return error(res, err);
@@ -72,7 +102,7 @@ exports.updateMedia = async (req, res) => {
 exports.deleteMedia = async (req, res) => {
     try {
         const media = await Media.findById(req.params.id);
-        if (!media) return error(res, { code: "NOT_FOUND" }, 404);
+        if (!media) return error(res, { code: "NOT_FOUND", message: "Media not found" }, 404);
 
         // Delete file from disk
         if (fs.existsSync(media.storagePath)) {
@@ -80,6 +110,16 @@ exports.deleteMedia = async (req, res) => {
         }
 
         await media.deleteOne();
+
+        await logAudit({
+            actorId: req.user.id,
+            action: "DELETE",
+            entityType: "Media",
+            entityId: media._id,
+            branchId: media.branchId,
+            before: media
+        }, req);
+
         return success(res, { message: "Media deleted" });
     } catch (err) {
         return error(res, err);
@@ -89,19 +129,48 @@ exports.deleteMedia = async (req, res) => {
 exports.streamMedia = async (req, res) => {
     try {
         const media = await Media.findById(req.params.id);
-        if (!media) return error(res, { code: "NOT_FOUND" }, 404);
+        if (!media) return error(res, { code: "NOT_FOUND", message: "Media not found" }, 404);
 
-        // Access control check (privacy) - simplified
-        // if (media.privacy === 'internal' && !req.user) ...
+        // Privacy check
+        const hasAccess = await securityGuard.checkPrivacy(media, req.user);
+        if (!hasAccess) {
+            return error(res, { code: "FORBIDDEN_PRIVATE_RESOURCE", message: "You do not have access to this media" }, 403);
+        }
 
         const filePath = media.storagePath;
         if (!fs.existsSync(filePath)) {
             return error(res, { code: "FILE_NOT_FOUND", message: "File missing on server" }, 404);
         }
 
-        // For video streaming, we should support range headers, but verify simple stream first.
-        // res.sendFile handles range headers automatically.
-        res.sendFile(filePath);
+        const stat = fs.statSync(filePath);
+        const fileSize = stat.size;
+
+        // Range-based streaming for video
+        if (media.kind === "video" && req.headers.range) {
+            const range = req.headers.range;
+            const parts = range.replace(/bytes=/, "").split("-");
+            const start = parseInt(parts[0], 10);
+            const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+            const chunkSize = end - start + 1;
+
+            const stream = fs.createReadStream(filePath, { start, end });
+
+            res.writeHead(206, {
+                "Content-Range": `bytes ${start}-${end}/${fileSize}`,
+                "Accept-Ranges": "bytes",
+                "Content-Length": chunkSize,
+                "Content-Type": media.mimeType,
+            });
+
+            stream.pipe(res);
+        } else {
+            // Full file response (images or video without range)
+            res.writeHead(200, {
+                "Content-Length": fileSize,
+                "Content-Type": media.mimeType,
+            });
+            fs.createReadStream(filePath).pipe(res);
+        }
     } catch (err) {
         return error(res, err);
     }

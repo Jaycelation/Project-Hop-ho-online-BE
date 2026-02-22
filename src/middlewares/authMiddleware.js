@@ -40,13 +40,7 @@ const authorizeRoles = (...roles) => {
     };
 };
 
-const checkPrivacy = (req, res, next) => {
-    // Deprecated: Privacy check is now handled explicitly in controllers using utils/securityGuard.js
-    next();
-};
-
 module.exports = {
     verifyToken,
     authorizeRoles,
-    checkPrivacy,
 };

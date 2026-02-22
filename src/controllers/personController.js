@@ -1,5 +1,8 @@
 const Person = require("../models/PersonModel");
 const Relationship = require("../models/RelationshipModel");
+const Event = require("../models/EventModel");
+const Media = require("../models/MediaModel");
+const fs = require("fs");
 const mongoose = require("mongoose");
 const { success, error } = require("../utils/responseHandler");
 const logAudit = require("../utils/auditLogger");
@@ -77,10 +80,22 @@ exports.deletePerson = async (req, res) => {
         if (!person) {
             return error(res, { code: "PERSON_NOT_FOUND", message: "Person not found" }, 404);
         }
-        // Should also delete relationships? Yes, ideally.
+        // Cascade delete relationships
         await Relationship.deleteMany({
             $or: [{ fromPersonId: req.params.id }, { toPersonId: req.params.id }]
         });
+
+        // Cascade delete related events
+        await Event.deleteMany({ personIds: req.params.id });
+
+        // Cascade delete related media (and cleanup files)
+        const relatedMedia = await Media.find({ personId: req.params.id });
+        for (const m of relatedMedia) {
+            if (m.storagePath && fs.existsSync(m.storagePath)) {
+                fs.unlinkSync(m.storagePath);
+            }
+        }
+        await Media.deleteMany({ personId: req.params.id });
 
         await logAudit({
             actorId: req.user.id,

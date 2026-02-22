@@ -1,5 +1,7 @@
 const Event = require("../models/EventModel");
 const { success, error } = require("../utils/responseHandler");
+const logAudit = require("../utils/auditLogger");
+const securityGuard = require("../utils/securityGuard");
 
 exports.createEvent = async (req, res) => {
     try {
@@ -16,6 +18,15 @@ exports.createEvent = async (req, res) => {
             privacy,
             createdBy: req.user.id
         });
+
+        await logAudit({
+            actorId: req.user.id,
+            action: "CREATE",
+            entityType: "Event",
+            entityId: event._id,
+            branchId: event.branchId,
+            after: event
+        }, req);
 
         return success(res, event, null, 201);
     } catch (err) {
@@ -45,9 +56,16 @@ exports.listEvents = async (req, res) => {
             .limit(limit)
             .sort({ eventDate: -1 });
 
+        // Filter by privacy — remove items user cannot see
+        const filtered = [];
+        for (const evt of events) {
+            const hasAccess = await securityGuard.checkPrivacy(evt, req.user);
+            if (hasAccess) filtered.push(evt);
+        }
+
         const total = await Event.countDocuments(query);
 
-        return success(res, events, { page, limit, total, totalPages: Math.ceil(total / limit) });
+        return success(res, filtered, { page, limit, total, totalPages: Math.ceil(total / limit) });
     } catch (err) {
         return error(res, err);
     }
@@ -58,7 +76,13 @@ exports.getEvent = async (req, res) => {
         const event = await Event.findById(req.params.id)
             .populate("personIds", "fullName");
 
-        if (!event) return error(res, { code: "NOT_FOUND" }, 404);
+        if (!event) return error(res, { code: "NOT_FOUND", message: "Event not found" }, 404);
+
+        const hasAccess = await securityGuard.checkPrivacy(event, req.user);
+        if (!hasAccess) {
+            return error(res, { code: "FORBIDDEN_PRIVATE_RESOURCE", message: "You do not have access to this event" }, 403);
+        }
+
         return success(res, event);
     } catch (err) {
         return error(res, err);
@@ -67,12 +91,25 @@ exports.getEvent = async (req, res) => {
 
 exports.updateEvent = async (req, res) => {
     try {
+        const originalEvent = await Event.findById(req.params.id);
+        if (!originalEvent) return error(res, { code: "NOT_FOUND", message: "Event not found" }, 404);
+
         const event = await Event.findByIdAndUpdate(
             req.params.id,
             { ...req.body, updatedBy: req.user.id },
             { new: true, runValidators: true }
         );
-        if (!event) return error(res, { code: "NOT_FOUND" }, 404);
+
+        await logAudit({
+            actorId: req.user.id,
+            action: "UPDATE",
+            entityType: "Event",
+            entityId: event._id,
+            branchId: event.branchId,
+            before: originalEvent,
+            after: event
+        }, req);
+
         return success(res, event);
     } catch (err) {
         return error(res, err);
@@ -82,7 +119,17 @@ exports.updateEvent = async (req, res) => {
 exports.deleteEvent = async (req, res) => {
     try {
         const event = await Event.findByIdAndDelete(req.params.id);
-        if (!event) return error(res, { code: "NOT_FOUND" }, 404);
+        if (!event) return error(res, { code: "NOT_FOUND", message: "Event not found" }, 404);
+
+        await logAudit({
+            actorId: req.user.id,
+            action: "DELETE",
+            entityType: "Event",
+            entityId: event._id,
+            branchId: event.branchId,
+            before: event
+        }, req);
+
         return success(res, { message: "Event deleted" });
     } catch (err) {
         return error(res, err);

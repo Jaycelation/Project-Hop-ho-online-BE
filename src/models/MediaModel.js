@@ -12,6 +12,7 @@ const MediaSchema = new mongoose.Schema(
         sizeBytes: { type: Number, required: true },
 
         storagePath: { type: String, required: true },
+        caption: { type: String, default: "" },
         hlsPath: { type: String, default: "" },
 
         privacy: { type: String, enum: ["public", "internal", "sensitive"], default: "internal", index: true },

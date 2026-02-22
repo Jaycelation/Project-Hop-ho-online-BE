@@ -2,29 +2,31 @@ const express = require("express");
 const router = express.Router();
 const personController = require("../controllers/personController");
 const { verifyToken, authorizeRoles } = require("../middlewares/authMiddleware");
+const validate = require("../middlewares/validate");
+const { createPersonSchema, updatePersonSchema } = require("../validators/personValidator");
 
-// Create (EDITOR+)
-router.post("/", verifyToken, authorizeRoles("admin", "editor"), personController.createPerson);
+// Create Person (EDITOR+)
+router.post("/", verifyToken, authorizeRoles("admin", "editor"), validate(createPersonSchema), personController.createPerson);
 
-// List
+// List Persons
 router.get("/", verifyToken, personController.listPersons);
 
-// Tree
-router.get("/:id/tree", verifyToken, personController.getTree);
-
-// Details
+// Get Person Details (with privacy check in controller)
 router.get("/:id", verifyToken, personController.getPerson);
 
-// Ancestors
+// Get Family Tree
+router.get("/:id/tree", verifyToken, personController.getTree);
+
+// Get Ancestors
 router.get("/:id/ancestors", verifyToken, personController.getAncestors);
 
-// Descendants
+// Get Descendants
 router.get("/:id/descendants", verifyToken, personController.getDescendants);
 
-// Update (EDITOR+)
-router.put("/:id", verifyToken, authorizeRoles("admin", "editor"), personController.updatePerson);
+// Update Person (EDITOR+)
+router.put("/:id", verifyToken, authorizeRoles("admin", "editor"), validate(updatePersonSchema), personController.updatePerson);
 
-// Delete (ADMIN/EDITOR)
+// Delete Person (EDITOR+)
 router.delete("/:id", verifyToken, authorizeRoles("admin", "editor"), personController.deletePerson);
 
 module.exports = router;

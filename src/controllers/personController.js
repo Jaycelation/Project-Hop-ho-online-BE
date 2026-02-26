@@ -131,16 +131,53 @@ exports.getPerson = async (req, res) => {
     }
 };
 
+// List Persons 
+// Fix List Persons
+// exports.listPersons = async (req, res) => {
+//     try {
+//         const { branchId, fullName } = req.query;
+//         const page = parseInt(req.query.page) || 1;
+//         const limit = parseInt(req.query.limit) || 20;
+
+//         let query = {};
+//         if (branchId) query.branchId = branchId;
+//         if (fullName) query.fullName = { $regex: fullName, $options: "i" };
+
+//         const persons = await Person.find(query)
+//             .skip((page - 1) * limit)
+//             .limit(limit)
+//             .sort({ fullName: 1 });
+
+//         const total = await Person.countDocuments(query);
+
+//         return success(res, persons, { page, limit, total, totalPages: Math.ceil(total / limit) });
+//     } catch (err) {
+//         return error(res, err);
+//     }
+// };
 // List Persons
 exports.listPersons = async (req, res) => {
     try {
-        const { branchId, fullName } = req.query;
+        const { branchId, fullName, privacy } = req.query;
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 20;
 
         let query = {};
         if (branchId) query.branchId = branchId;
         if (fullName) query.fullName = { $regex: fullName, $options: "i" };
+        
+        if (privacy) {
+            if (!["public", "internal", "sensitive"].includes(privacy)) {
+                return res.status(400).json({
+                    success: false,
+                    error: {
+                        code: "INVALID_PRIVACY",
+                        message: "Invalid privacy level. Must be public, internal, or sensitive."
+                    }
+                });
+            }
+            query.privacy = privacy;
+        }
 
         const persons = await Person.find(query)
             .skip((page - 1) * limit)

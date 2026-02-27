@@ -195,43 +195,281 @@ exports.listPersons = async (req, res) => {
 // Get Tree (Ancestors and Descendants)
 // Simplified implementation: returns immediate parents/children/spouses.
 // (depth/includeSpouses/format are handled in /ancestors and /descendants endpoints in this codebase)
+// exports.getTree = async (req, res) => {
+//     try {
+//         const { id } = req.params;
+
+//         const root = await Person.findById(id);
+//         if (!root) {
+//             return error(res, { code: "PERSON_NOT_FOUND", message: "Person not found" }, 404);
+//         }
+
+//         const hasAccess = await securityGuard.checkPrivacy(root, req.user);
+//         if (!hasAccess) {
+//             return error(
+//                 res,
+//                 { code: "FORBIDDEN_PRIVATE_RESOURCE", message: "You do not have access to this person" },
+//                 403
+//             );
+//         }
+
+//         // Parents: rel where toPersonId = child, fromPersonId = parent
+//         const parentRels = await Relationship.find({ toPersonId: id, type: "parent_of" }).populate("fromPersonId");
+//         const parents = parentRels.map(r => r.fromPersonId);
+
+//         // Children: rel where fromPersonId = parent, toPersonId = child
+//         const childRels = await Relationship.find({ fromPersonId: id, type: "parent_of" }).populate("toPersonId");
+//         const children = childRels.map(r => r.toPersonId);
+
+//         // Spouses
+//         const spouseRels = await Relationship.find({
+//             type: "spouse_of",
+//             $or: [{ fromPersonId: id }, { toPersonId: id }]
+//         }).populate("fromPersonId toPersonId");
+//         const spouses = spouseRels.map(r => (r.fromPersonId._id.toString() === id ? r.toPersonId : r.fromPersonId));
+
+//         return success(res, { root, parents, children, spouses });
+//     } catch (err) {
+//         return error(res, err);
+//     }
+// };
 exports.getTree = async (req, res) => {
-    try {
-        const { id } = req.params;
+  try {
+    const { id } = req.params;
 
-        const root = await Person.findById(id);
-        if (!root) {
-            return error(res, { code: "PERSON_NOT_FOUND", message: "Person not found" }, 404);
-        }
+    const format = String(req.query.format || "nested").toLowerCase();
+    const depthRaw = parseInt(req.query.depth, 10);
+    const depth = Number.isFinite(depthRaw) ? Math.max(0, Math.min(depthRaw, 10)) : 3;
 
-        const hasAccess = await securityGuard.checkPrivacy(root, req.user);
-        if (!hasAccess) {
-            return error(
-                res,
-                { code: "FORBIDDEN_PRIVATE_RESOURCE", message: "You do not have access to this person" },
-                403
-            );
-        }
+    const includeSpouses = (() => {
+      const v = req.query.includeSpouses;
+      if (v === undefined || v === null) return true;
+      const s = String(v).toLowerCase();
+      return s === "true" || s === "1" || s === "yes" || s === "y";
+    })();
 
-        // Parents: rel where toPersonId = child, fromPersonId = parent
-        const parentRels = await Relationship.find({ toPersonId: id, type: "parent_of" }).populate("fromPersonId");
-        const parents = parentRels.map(r => r.fromPersonId);
-
-        // Children: rel where fromPersonId = parent, toPersonId = child
-        const childRels = await Relationship.find({ fromPersonId: id, type: "parent_of" }).populate("toPersonId");
-        const children = childRels.map(r => r.toPersonId);
-
-        // Spouses
-        const spouseRels = await Relationship.find({
-            type: "spouse_of",
-            $or: [{ fromPersonId: id }, { toPersonId: id }]
-        }).populate("fromPersonId toPersonId");
-        const spouses = spouseRels.map(r => (r.fromPersonId._id.toString() === id ? r.toPersonId : r.fromPersonId));
-
-        return success(res, { root, parents, children, spouses });
-    } catch (err) {
-        return error(res, err);
+    const root = await Person.findById(id);
+    if (!root) {
+      return error(res, { code: "PERSON_NOT_FOUND", message: "Person not found" }, 404);
     }
+
+    const hasAccess = await securityGuard.checkPrivacy(root, req.user);
+    if (!hasAccess) {
+      return error(
+        res,
+        { code: "FORBIDDEN_PRIVATE_RESOURCE", message: "You do not have access to this person" },
+        403
+      );
+    }
+
+    // Backward-compatible "flat"
+    if (format !== "nested") {
+      const parentRels = await Relationship.find({ toPersonId: id, type: "parent_of" }).populate("fromPersonId");
+      const parents = parentRels.map((r) => r.fromPersonId);
+
+      const childRels = await Relationship.find({ fromPersonId: id, type: "parent_of" }).populate("toPersonId");
+      const children = childRels.map((r) => r.toPersonId);
+
+      const spouseRels = await Relationship.find({
+        type: "spouse_of",
+        $or: [{ fromPersonId: id }, { toPersonId: id }],
+      }).populate("fromPersonId toPersonId");
+      const spouses = spouseRels.map((r) => (r.fromPersonId._id.toString() === id ? r.toPersonId : r.fromPersonId));
+
+      return success(res, { root, parents, children, spouses });
+    }
+
+    // ===== NESTED TREE =====
+    const rootId = root._id.toString();
+
+    const edgesChild = new Map();  // parentId -> Set(childId)
+    const edgesParent = new Map(); // childId  -> Set(parentId)
+    const allIds = new Set([rootId]);
+
+    // Descendants
+    let current = [rootId];
+    for (let i = 0; i < depth; i++) {
+      if (!current.length) break;
+
+      const rels = await Relationship.find({
+        fromPersonId: { $in: current },
+        type: "parent_of",
+      })
+        .select("fromPersonId toPersonId")
+        .lean();
+
+      const next = [];
+      for (const r of rels) {
+        const fromId = r.fromPersonId.toString();
+        const toId = r.toPersonId.toString();
+
+        if (!edgesChild.has(fromId)) edgesChild.set(fromId, new Set());
+        edgesChild.get(fromId).add(toId);
+
+        if (!allIds.has(toId)) {
+          allIds.add(toId);
+          next.push(toId);
+        }
+      }
+      current = next;
+    }
+
+    // Ancestors
+    current = [rootId];
+    for (let i = 0; i < depth; i++) {
+      if (!current.length) break;
+
+      const rels = await Relationship.find({
+        toPersonId: { $in: current },
+        type: "parent_of",
+      })
+        .select("fromPersonId toPersonId")
+        .lean();
+
+      const next = [];
+      for (const r of rels) {
+        const parentId = r.fromPersonId.toString();
+        const childId = r.toPersonId.toString();
+
+        if (!edgesParent.has(childId)) edgesParent.set(childId, new Set());
+        edgesParent.get(childId).add(parentId);
+
+        if (!allIds.has(parentId)) {
+          allIds.add(parentId);
+          next.push(parentId);
+        }
+      }
+      current = next;
+    }
+
+    // Spouses
+    const spouseMap = new Map(); // personId -> Set(spouseId)
+    if (includeSpouses) {
+      const idsArr = Array.from(allIds);
+      const rels = await Relationship.find({
+        type: "spouse_of",
+        $or: [{ fromPersonId: { $in: idsArr } }, { toPersonId: { $in: idsArr } }],
+      })
+        .select("fromPersonId toPersonId")
+        .lean();
+
+      for (const r of rels) {
+        const a = r.fromPersonId.toString();
+        const b = r.toPersonId.toString();
+
+        if (!spouseMap.has(a)) spouseMap.set(a, new Set());
+        if (!spouseMap.has(b)) spouseMap.set(b, new Set());
+        spouseMap.get(a).add(b);
+        spouseMap.get(b).add(a);
+
+        allIds.add(a);
+        allIds.add(b);
+      }
+    }
+
+    // Fetch persons + privacy filter
+    const persons = await Person.find({ _id: { $in: Array.from(allIds) } });
+    const personById = new Map(persons.map((p) => [p._id.toString(), p]));
+
+    const allowed = new Set();
+    for (const [pid, p] of personById.entries()) {
+      // eslint-disable-next-line no-await-in-loop
+      const ok = await securityGuard.checkPrivacy(p, req.user);
+      if (ok) allowed.add(pid);
+    }
+    if (!allowed.has(rootId)) {
+      return error(
+        res,
+        { code: "FORBIDDEN_PRIVATE_RESOURCE", message: "You do not have access to this person" },
+        403
+      );
+    }
+
+    const filterSetMap = (map) => {
+      for (const [k, set] of map.entries()) {
+        if (!allowed.has(k)) {
+          map.delete(k);
+          continue;
+        }
+        for (const v of Array.from(set)) {
+          if (!allowed.has(v)) set.delete(v);
+        }
+        if (set.size === 0) map.delete(k);
+      }
+    };
+    filterSetMap(edgesChild);
+    filterSetMap(edgesParent);
+    filterSetMap(spouseMap);
+
+    const toPlainPerson = (pid) => {
+      const doc = personById.get(pid);
+      return doc ? doc.toObject() : null;
+    };
+
+    const buildDescTree = (pid, remain, path) => {
+      if (!allowed.has(pid)) return null;
+      const me = toPlainPerson(pid);
+      if (!me) return null;
+
+      me.spouses = includeSpouses
+        ? Array.from(spouseMap.get(pid) || [])
+            .filter((sid) => allowed.has(sid))
+            .map((sid) => toPlainPerson(sid))
+            .filter(Boolean)
+        : [];
+
+      me.children = [];
+      if (remain <= 0) return me;
+
+      const childIds = Array.from(edgesChild.get(pid) || []);
+      for (const cid of childIds) {
+        if (path.has(cid)) continue;
+        const nextPath = new Set(path);
+        nextPath.add(cid);
+        const childNode = buildDescTree(cid, remain - 1, nextPath);
+        if (childNode) me.children.push(childNode);
+      }
+      return me;
+    };
+
+    const buildAncTree = (pid, remain, path) => {
+      if (!allowed.has(pid)) return null;
+      const me = toPlainPerson(pid);
+      if (!me) return null;
+
+      me.spouses = includeSpouses
+        ? Array.from(spouseMap.get(pid) || [])
+            .filter((sid) => allowed.has(sid))
+            .map((sid) => toPlainPerson(sid))
+            .filter(Boolean)
+        : [];
+
+      me.parents = [];
+      if (remain <= 0) return me;
+
+      const parentIds = Array.from(edgesParent.get(pid) || []);
+      for (const parId of parentIds) {
+        if (path.has(parId)) continue;
+        const nextPath = new Set(path);
+        nextPath.add(parId);
+        const parentNode = buildAncTree(parId, remain - 1, nextPath);
+        if (parentNode) me.parents.push(parentNode);
+      }
+      return me;
+    };
+
+    const rootNode = buildDescTree(rootId, depth, new Set([rootId])) || root.toObject();
+    const rootAnc = buildAncTree(rootId, depth, new Set([rootId]));
+    rootNode.parents = rootAnc?.parents || [];
+
+    rootNode.spouses = rootNode.spouses || [];
+    rootNode.children = rootNode.children || [];
+    rootNode.parents = rootNode.parents || [];
+
+    return success(res, { root: rootNode });
+  } catch (err) {
+    return error(res, err);
+  }
 };
 
 // Get Ancestors (placeholder for deep traversal)

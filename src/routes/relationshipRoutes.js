@@ -8,11 +8,14 @@ const { createRelationshipSchema, updateRelationshipSchema } = require("../valid
 // Create (EDITOR+)
 router.post("/", verifyToken, authorizeRoles("admin", "editor"), validate(createRelationshipSchema), relController.createRelationship);
 
+// Get by Person
+router.get("/person/:personId", verifyToken, relController.getPersonRelationships);
+
 // Get by ID
 router.get("/:id", verifyToken, relController.getRelationship);
 
-// Get by Person
-router.get("/person/:personId", verifyToken, relController.getPersonRelationships);
+// // Get by Person
+// router.get("/person/:personId", verifyToken, relController.getPersonRelationships);
 
 // Update (EDITOR+)
 router.put("/:id", verifyToken, authorizeRoles("admin", "editor"), validate(updateRelationshipSchema), relController.updateRelationship);

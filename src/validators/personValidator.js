@@ -23,6 +23,8 @@ const updatePersonSchema = z.object({
     privacy: z.enum(["public", "internal", "sensitive"]).optional(),
     note: z.string().max(2000).optional(),
     generation: z.number().int().optional().nullable(),
+    
+    avatarMediaId: z.string().optional().nullable(),
 });
 
 module.exports = { createPersonSchema, updatePersonSchema };

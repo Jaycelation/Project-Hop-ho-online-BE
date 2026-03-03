@@ -13,8 +13,13 @@ const updateUserRoleSchema = z.object({
     }),
 });
 
+const changePasswordSchema = z.object({
+    currentPassword: z.string().min(1, "Vui lòng nhập mật khẩu hiện tại"),
+    newPassword: z.string().min(6, "Mật khẩu mới phải có ít nhất 6 ký tự"),
+});
+
 const banUserSchema = z.object({
     isBanned: z.boolean({ required_error: "isBanned is required" }),
 });
 
-module.exports = { updateMeSchema, updateUserRoleSchema, banUserSchema };
+module.exports = { updateMeSchema, updateUserRoleSchema, banUserSchema, changePasswordSchema };

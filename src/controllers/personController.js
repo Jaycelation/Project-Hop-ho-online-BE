@@ -7,6 +7,7 @@ const mongoose = require("mongoose");
 const { success, error } = require("../utils/responseHandler");
 const logAudit = require("../utils/auditLogger");
 const securityGuard = require("../utils/securityGuard");
+const { filterPersonsByPrivacy } = require("../utils/privacyFilter");
 
 // Create Person
 exports.createPerson = async (req, res) => {
@@ -74,29 +75,42 @@ exports.updatePerson = async (req, res) => {
 };
 
 // Delete Person
+// Thay thế toàn bộ hàm deletePerson
 exports.deletePerson = async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
     try {
-        const person = await Person.findByIdAndDelete(req.params.id);
+        const person = await Person.findById(req.params.id).session(session);
         if (!person) {
+            await session.abortTransaction();
+            session.endSession();
             return error(res, { code: "PERSON_NOT_FOUND", message: "Person not found" }, 404);
         }
-        // Cascade delete relationships
+
+        await Person.findByIdAndDelete(req.params.id).session(session);
+
         await Relationship.deleteMany({
             $or: [{ fromPersonId: req.params.id }, { toPersonId: req.params.id }]
-        });
+        }).session(session);
 
-        // Cascade delete related events
-        await Event.deleteMany({ personIds: req.params.id });
+        await Event.updateMany(
+            { personIds: req.params.id },
+            { $pull: { personIds: req.params.id } }
+        ).session(session);
 
-        // Cascade delete related media (and cleanup files)
-        const relatedMedia = await Media.find({ personId: req.params.id });
+        const relatedMedia = await Media.find({ personId: req.params.id }).session(session);
         for (const m of relatedMedia) {
             if (m.storagePath && fs.existsSync(m.storagePath)) {
                 fs.unlinkSync(m.storagePath);
             }
         }
-        await Media.deleteMany({ personId: req.params.id });
+        await Media.deleteMany({ personId: req.params.id }).session(session);
 
+        await session.commitTransaction();
+        session.endSession();
+
+        // Ghi Log Audit (chạy độc lập ngoài transaction để không block)
         await logAudit({
             actorId: req.user.id,
             action: "DELETE",
@@ -106,8 +120,10 @@ exports.deletePerson = async (req, res) => {
             before: person
         }, req);
 
-        return success(res, { message: "Person deleted" });
+        return success(res, { message: "Person deleted successfully" });
     } catch (err) {
+        await session.abortTransaction();
+        session.endSession();
         return error(res, err);
     }
 };
@@ -163,7 +179,15 @@ exports.listPersons = async (req, res) => {
         const limit = parseInt(req.query.limit) || 20;
 
         let query = {};
-        if (branchId) query.branchId = branchId;
+        if (branchId) {
+            if (!mongoose.Types.ObjectId.isValid(branchId)) {
+                return res.status(400).json({
+                    success: false,
+                    error: { code: "INVALID_BRANCH_ID", message: "Mã chi nhánh không hợp lệ" }
+                });
+            }
+            query.branchId = branchId;
+        }
         if (fullName) query.fullName = { $regex: fullName, $options: "i" };
         
         if (privacy) {
@@ -184,9 +208,11 @@ exports.listPersons = async (req, res) => {
             .limit(limit)
             .sort({ fullName: 1 });
 
+        const safePersons = await filterPersonsByPrivacy(persons, securityGuard, req.user);
+
         const total = await Person.countDocuments(query);
 
-        return success(res, persons, { page, limit, total, totalPages: Math.ceil(total / limit) });
+        return success(res, safePersons, { page, limit, total, totalPages: Math.ceil(total / limit) });
     } catch (err) {
         return error(res, err);
     }
@@ -238,8 +264,9 @@ exports.getTree = async (req, res) => {
     const { id } = req.params;
 
     const format = String(req.query.format || "nested").toLowerCase();
-    const depthRaw = parseInt(req.query.depth, 10);
-    const depth = Number.isFinite(depthRaw) ? Math.max(0, Math.min(depthRaw, 10)) : 3;
+    const depthRaw = parseInt(req.query.depth) || 5;
+    const depth = Number.isFinite(depthRaw) ? Math.max(1, Math.min(depthRaw, 10)) : 5;
+    const maxDepth = Math.max(0, depth - 1);
 
     const includeSpouses = (() => {
       const v = req.query.includeSpouses;
@@ -401,9 +428,47 @@ exports.getTree = async (req, res) => {
     filterSetMap(edgesParent);
     filterSetMap(spouseMap);
 
+    const includeSiblings = (() => {
+      const v = req.query.includeSiblings;
+      if (v === undefined || v === null) return false;
+      const s = String(v).toLowerCase();
+      return s === "true" || s === "1" || s === "yes" || s === "y";
+    })();
+
+    let siblings = [];
+    if (includeSiblings) {
+      const parentIds = Array.from(edgesParent.get(rootId) || []);
+      const sibIds = new Set();
+      for (const pid of parentIds) {
+        const kids = Array.from(edgesChild.get(pid) || []);
+        for (const kidId of kids) {
+          if (kidId !== rootId) sibIds.add(kidId);
+        }
+      }
+      siblings = Array.from(sibIds)
+        .filter((sid) => allowed.has(sid)) // Chỉ lấy những người có quyền xem
+        .map((sid) => toPlainPerson(sid))
+        .filter(Boolean);
+    }
+
     const toPlainPerson = (pid) => {
-      const doc = personById.get(pid);
-      return doc ? doc.toObject() : null;
+    const doc = personById.get(pid);
+    if (!doc) return null;
+    
+    const obj = doc.toObject();
+    
+    if (includeSpouses && spouseMap.has(pid)) {
+        obj.spouses = Array.from(spouseMap.get(pid))
+        .filter((sid) => allowed.has(sid))
+        .map((sid) => {
+            const sDoc = personById.get(sid);
+            return sDoc ? sDoc.toObject() : null;
+        })
+        .filter(Boolean);
+    } else {
+        obj.spouses = [];
+    }
+        return obj;
     };
 
     const buildDescTree = (pid, remain, path) => {
@@ -466,6 +531,8 @@ exports.getTree = async (req, res) => {
     rootNode.children = rootNode.children || [];
     rootNode.parents = rootNode.parents || [];
 
+    rootNode.siblings = siblings || [];
+
     return success(res, { root: rootNode });
   } catch (err) {
     return error(res, err);
@@ -477,8 +544,9 @@ exports.getTree = async (req, res) => {
 exports.getAncestors = async (req, res) => {
     try {
         const { id } = req.params;
-        const depth = parseInt(req.query.depth) || 5; // Default depth 5
-
+        const depthRaw = parseInt(req.query.depth) || 5;
+        const depth = Number.isFinite(depthRaw) ? Math.max(1, Math.min(depthRaw, 10)) : 5; // Default depth 5
+        const maxDepth = Math.max(0, depth - 1);
         const ancestors = await Relationship.aggregate([
             {
                 $match: {
@@ -526,7 +594,7 @@ exports.getAncestors = async (req, res) => {
                     connectFromField: "fromPersonId",
                     connectToField: "toPersonId",
                     as: "hierarchy",
-                    maxDepth: depth,
+                    maxDepth: maxDepth,
                     restrictSearchWithMatch: { type: "parent_of" }
                 }
             }
@@ -549,8 +617,8 @@ exports.getAncestors = async (req, res) => {
         ancestorIds = [...new Set(ancestorIds.map(id => id.toString()))];
 
         const people = await Person.find({ _id: { $in: ancestorIds } });
-
-        return success(res, people);
+        const safePeople = await filterPersonsByPrivacy(people, securityGuard, req.user);
+        return success(res, safePeople);
     } catch (err) {
         return error(res, err);
     }
@@ -561,7 +629,9 @@ exports.getAncestors = async (req, res) => {
 exports.getDescendants = async (req, res) => {
     try {
         const { id } = req.params;
-        const depth = parseInt(req.query.depth) || 5;
+        const depthRaw = parseInt(req.query.depth) || 5;
+        const depth = Number.isFinite(depthRaw) ? Math.max(1, Math.min(depthRaw, 10)) : 5;
+        const maxDepth = Math.max(0, depth - 1);
 
         // Find children recursively
         // 'parent_of': fromPerson = Parent, toPerson = Child.
@@ -590,7 +660,7 @@ exports.getDescendants = async (req, res) => {
                     connectFromField: "toPersonId", // The child becomes the 'from' (parent) in next
                     connectToField: "fromPersonId",
                     as: "descendants",
-                    maxDepth: depth,
+                    maxDepth: maxDepth,
                     restrictSearchWithMatch: { type: "parent_of" }
                 }
             }
@@ -608,8 +678,8 @@ exports.getDescendants = async (req, res) => {
 
         descendantIds = [...new Set(descendantIds.map(id => id.toString()))];
         const people = await Person.find({ _id: { $in: descendantIds } });
-
-        return success(res, people);
+        const safePeople = await filterPersonsByPrivacy(people, securityGuard, req.user);
+        return success(res, safePeople);
 
     } catch (err) {
         return error(res, err);

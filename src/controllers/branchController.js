@@ -1,7 +1,14 @@
+const mongoose = require("mongoose");
+const fs = require("fs");
 const Branch = require("../models/BranchModel");
 const User = require("../models/UserModel");
 const { success, error } = require("../utils/responseHandler");
 const logAudit = require("../utils/auditLogger");
+const Person = require("../models/PersonModel");
+const Event = require("../models/EventModel");
+const Relationship = require("../models/RelationshipModel");
+const Media = require("../models/MediaModel");
+
 
 // List branches (MEMBER+)
 exports.listBranches = async (req, res) => {
@@ -130,11 +137,34 @@ exports.updateBranch = async (req, res) => {
 
 // Delete Branch (ADMIN)
 exports.deleteBranch = async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
     try {
-        const branch = await Branch.findByIdAndDelete(req.params.id);
+        const branchId = req.params.id;
+        const branch = await Branch.findById(branchId).session(session);
         if (!branch) {
+            await session.abortTransaction();
+            session.endSession();
             return error(res, { code: "BRANCH_NOT_FOUND", message: "Branch not found" }, 404);
         }
+
+        const relatedMedia = await Media.find({ branchId }).session(session);
+        for (const m of relatedMedia) {
+            if (m.storagePath && fs.existsSync(m.storagePath)) {
+                fs.unlinkSync(m.storagePath);
+            }
+        }
+
+        await Media.deleteMany({ branchId }).session(session);
+        await Event.deleteMany({ branchId }).session(session);
+        await Relationship.deleteMany({ branchId }).session(session);
+        await Person.deleteMany({ branchId }).session(session);
+        
+        await Branch.findByIdAndDelete(branchId).session(session);
+
+        await session.commitTransaction();
+        session.endSession();
 
         await logAudit({
             actorId: req.user.id,
@@ -145,8 +175,10 @@ exports.deleteBranch = async (req, res) => {
             before: branch
         }, req);
 
-        return success(res, { message: "Branch deleted" });
+        return success(res, { message: "Branch and all related data deleted" });
     } catch (err) {
+        await session.abortTransaction();
+        session.endSession();
         return error(res, err);
     }
 };

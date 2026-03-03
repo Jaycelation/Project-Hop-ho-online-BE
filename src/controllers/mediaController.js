@@ -48,6 +48,22 @@ exports.uploadMedia = async (req, res) => {
     }
 };
 
+exports.listMedia = async (req, res) => {
+    try {
+        const { kind, branchId } = req.query;
+        const filter = {};
+        
+        if (kind) filter.kind = kind;
+        if (branchId) filter.branchId = branchId;
+
+        const mediaList = await Media.find(filter).sort({ createdAt: -1 });
+
+        return success(res, mediaList);
+    } catch (err) {
+        return error(res, err);
+    }
+};
+
 exports.getMedia = async (req, res) => {
     try {
         const media = await Media.findById(req.params.id);

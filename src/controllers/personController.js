@@ -75,29 +75,42 @@ exports.updatePerson = async (req, res) => {
 };
 
 // Delete Person
+// Thay thế toàn bộ hàm deletePerson
 exports.deletePerson = async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
     try {
-        const person = await Person.findByIdAndDelete(req.params.id);
+        const person = await Person.findById(req.params.id).session(session);
         if (!person) {
+            await session.abortTransaction();
+            session.endSession();
             return error(res, { code: "PERSON_NOT_FOUND", message: "Person not found" }, 404);
         }
-        // Cascade delete relationships
+
+        await Person.findByIdAndDelete(req.params.id).session(session);
+
         await Relationship.deleteMany({
             $or: [{ fromPersonId: req.params.id }, { toPersonId: req.params.id }]
-        });
+        }).session(session);
 
-        // Cascade delete related events
-        await Event.deleteMany({ personIds: req.params.id });
+        await Event.updateMany(
+            { personIds: req.params.id },
+            { $pull: { personIds: req.params.id } }
+        ).session(session);
 
-        // Cascade delete related media (and cleanup files)
-        const relatedMedia = await Media.find({ personId: req.params.id });
+        const relatedMedia = await Media.find({ personId: req.params.id }).session(session);
         for (const m of relatedMedia) {
             if (m.storagePath && fs.existsSync(m.storagePath)) {
                 fs.unlinkSync(m.storagePath);
             }
         }
-        await Media.deleteMany({ personId: req.params.id });
+        await Media.deleteMany({ personId: req.params.id }).session(session);
 
+        await session.commitTransaction();
+        session.endSession();
+
+        // Ghi Log Audit (chạy độc lập ngoài transaction để không block)
         await logAudit({
             actorId: req.user.id,
             action: "DELETE",
@@ -107,8 +120,10 @@ exports.deletePerson = async (req, res) => {
             before: person
         }, req);
 
-        return success(res, { message: "Person deleted" });
+        return success(res, { message: "Person deleted successfully" });
     } catch (err) {
+        await session.abortTransaction();
+        session.endSession();
         return error(res, err);
     }
 };

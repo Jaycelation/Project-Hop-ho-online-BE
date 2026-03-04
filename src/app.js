@@ -23,6 +23,8 @@ const mediaRoutes = require("./routes/mediaRoutes");
 const searchRoutes = require("./routes/searchRoutes");
 const auditRoutes = require("./routes/auditRoutes");
 const systemRoutes = require("./routes/systemRoutes");
+const moderationRoutes = require("./routes/moderationRoutes");
+const postRoutes = require("./routes/postRoutes");
 
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
@@ -33,6 +35,8 @@ app.use("/api/events", eventRoutes);
 app.use("/api/media", mediaRoutes);
 app.use("/api/search", searchRoutes);
 app.use("/api/audit", auditRoutes);
+app.use("/api/moderation", moderationRoutes);
+app.use("/api/posts", postRoutes);
 app.use("/api", systemRoutes); // For /api/health
 
 // Error Handler

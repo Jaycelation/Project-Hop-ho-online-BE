@@ -1,20 +1,44 @@
 const express = require("express");
 const router = express.Router();
 const mediaController = require("../controllers/mediaController");
-const { verifyToken, authorizeRoles } = require("../middlewares/authMiddleware");
+const { verifyToken, authorizeBranchAccess, authorizeRoles } = require("../middlewares/authMiddleware");
 const upload = require("../middlewares/uploadMiddleware");
 const validate = require("../middlewares/validate");
 const { uploadMediaSchema, updateMediaSchema } = require("../validators/mediaValidator");
 
-// Upload (file first via multer, then validate body fields)
-router.post("/upload", verifyToken, authorizeRoles("admin", "editor"), upload.single("file"), validate(uploadMediaSchema), mediaController.uploadMedia);
+// ─── Upload Media (any branch member can upload; status defaults to pending) ──
+// Note: multer parses the multipart body, so branchId appears in req.body after upload
+// We do authorizeBranchAccess AFTER multer processes the form so branchId is available
+router.post(
+    "/upload",
+    verifyToken,
+    upload.single("file"),
+    authorizeBranchAccess("viewer"), // any branch member (viewer+) can upload; goes to moderation
+    validate(uploadMediaSchema),
+    mediaController.uploadMedia
+);
 
-// Meta Data
+// ─── Get Media metadata (privacy check in controller) ─────────────────────────
 router.get("/:id", verifyToken, mediaController.getMedia);
-router.put("/:id", verifyToken, authorizeRoles("admin", "editor"), validate(updateMediaSchema), mediaController.updateMedia);
-router.delete("/:id", verifyToken, authorizeRoles("admin", "editor"), mediaController.deleteMedia);
 
-// Stream
+// ─── Update Media metadata (branch editor+) ────────────────────────────────────
+router.put(
+    "/:id",
+    verifyToken,
+    authorizeRoles("admin", "editor"),
+    validate(updateMediaSchema),
+    mediaController.updateMedia
+);
+
+// ─── Delete Media (branch editor+) ────────────────────────────────────────────
+router.delete(
+    "/:id",
+    verifyToken,
+    authorizeRoles("admin", "editor"),
+    mediaController.deleteMedia
+);
+
+// ─── Stream (privacy check in controller) ─────────────────────────────────────
 router.get("/stream/:id", verifyToken, mediaController.streamMedia);
 
 module.exports = router;

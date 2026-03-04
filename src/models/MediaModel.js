@@ -17,6 +17,9 @@ const MediaSchema = new mongoose.Schema(
 
         privacy: { type: String, enum: ["public", "internal", "sensitive"], default: "internal", index: true },
 
+        // Moderation status (all uploads start as pending until an editor approves)
+        status: { type: String, enum: ["pending", "approved", "rejected"], default: "pending", index: true },
+
         uploadedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
     },
     { timestamps: true }

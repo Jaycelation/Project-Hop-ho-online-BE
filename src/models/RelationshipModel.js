@@ -9,6 +9,25 @@ const RelationshipSchema = new mongoose.Schema(
 
         type: { type: String, enum: ["parent_of", "spouse_of", "sibling_of"], required: true, index: true },
 
+        // ── New: Spouse relationship metadata ──────────────────────────────────
+        status: {
+            type: String,
+            enum: ["married", "divorced", "separated", "unknown"],
+            default: "unknown",
+        },
+        startDate: { type: String, default: "" },   // Ngày kết hôn (string, can be lunar)
+        endDate: { type: String, default: "" },   // Ngày ly hôn
+
+        // ── New: Parent-child sub type ─────────────────────────────────────────
+        subType: {
+            type: String,
+            enum: ["biological", "adopted", "stepchild", "unknown"],
+            default: "biological",
+        },
+
+        // ── New: General note ─────────────────────────────────────────────────
+        note: { type: String, default: "" },
+
         createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     },
     { timestamps: true }

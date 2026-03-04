@@ -1,9 +1,16 @@
 const Branch = require("../models/BranchModel");
+const Person = require("../models/PersonModel");
+const Relationship = require("../models/RelationshipModel");
+const Event = require("../models/EventModel");
+const Media = require("../models/MediaModel");
 const User = require("../models/UserModel");
+const mongoose = require("mongoose");
+const fs = require("fs");
+const fsPromises = require("fs").promises; // async file ops
 const { success, error } = require("../utils/responseHandler");
 const logAudit = require("../utils/auditLogger");
 
-// List branches (MEMBER+)
+// ─── List Branches ─────────────────────────────────────────────────────────────
 exports.listBranches = async (req, res) => {
     try {
         const { role, id } = req.user;
@@ -13,7 +20,7 @@ exports.listBranches = async (req, res) => {
 
         let query = {};
         if (role === "admin") {
-            // Admin sees all
+            // Admin sees all branches
         } else {
             query = {
                 $or: [
@@ -42,34 +49,126 @@ exports.listBranches = async (req, res) => {
     }
 };
 
-// Create Branch (ADMIN/EDITOR)
-exports.createBranch = async (req, res) => {
-    try {
-        const { name, description } = req.body;
 
-        const branch = await Branch.create({
-            name,
-            description,
-            ownerId: req.user.id,
-            members: []
-        });
+// ─── Create Branch (ADMIN / global EDITOR) ────────────────────────────────────
+// Supports optional atomic root person creation via Mongo session.
+// Body: { name, description, root?: { fullName, gender, dateOfBirth?, birthYear?, hometown?, note? } }
+exports.createBranch = async (req, res) => {
+    const session = await mongoose.startSession();
+    try {
+        const { name, description, root } = req.body;
+        let branch, rootPerson;
+
+        if (root && root.fullName) {
+            // ── ATOMIC path: branch + root person in one transaction ──────────────
+            session.startTransaction();
+
+            // 1. Create branch (rootPersonId set after person is created)
+            [branch] = await Branch.create(
+                [{ name, description: description || "", ownerId: req.user.id, members: [] }],
+                { session }
+            );
+
+            // 2. Create root person belonging to this branch
+            [rootPerson] = await Person.create(
+                [{
+                    branchId: branch._id,
+                    fullName: root.fullName,
+                    gender: root.gender || "male",
+                    dateOfBirth: root.dateOfBirth || "",
+                    birthYear: root.birthYear || null,
+                    hometown: root.hometown || "",
+                    note: root.note || "",
+                    privacy: "internal",
+                    isAlive: true,
+                    generation: 1,
+                    createdBy: req.user.id,
+                }],
+                { session }
+            );
+
+            // 3. Link rootPersonId back to branch
+            branch.rootPersonId = rootPerson._id;
+            await branch.save({ session });
+
+            await session.commitTransaction();
+
+            await logAudit({
+                actorId: req.user.id,
+                action: "CREATE",
+                entityType: "Branch",
+                entityId: branch._id,
+                branchId: branch._id,
+                after: { branch, rootPerson }
+            }, req);
+
+            return success(res, { branch, rootPerson }, null, 201);
+
+        } else {
+            // ── Simple path: branch only (backwards compatible) ───────────────────
+            branch = await Branch.create({
+                name,
+                description: description || "",
+                ownerId: req.user.id,
+                members: []
+            });
+
+            await logAudit({
+                actorId: req.user.id,
+                action: "CREATE",
+                entityType: "Branch",
+                entityId: branch._id,
+                branchId: branch._id,
+                after: branch
+            }, req);
+
+            return success(res, { branch, rootPerson: null }, null, 201);
+        }
+    } catch (err) {
+        if (session.inTransaction()) await session.abortTransaction();
+        return error(res, err);
+    } finally {
+        session.endSession();
+    }
+};
+
+// ─── Set Root Person (PATCH /api/branches/:id/root) ───────────────────────────
+exports.setRootPerson = async (req, res) => {
+    try {
+        const { rootPersonId } = req.body;
+        if (!rootPersonId || !mongoose.Types.ObjectId.isValid(rootPersonId)) {
+            return error(res, { code: "INVALID_OBJECT_ID", message: "rootPersonId không hợp lệ" }, 400);
+        }
+
+        const branch = await Branch.findById(req.params.id);
+        if (!branch) return error(res, { code: "BRANCH_NOT_FOUND", message: "Branch not found" }, 404);
+
+        const person = await Person.findById(rootPersonId);
+        if (!person) return error(res, { code: "PERSON_NOT_FOUND", message: "Person not found" }, 404);
+        if (person.branchId.toString() !== branch._id.toString()) {
+            return error(res, { code: "PERSON_NOT_IN_BRANCH", message: "Person không thuộc branch này" }, 400);
+        }
+
+        branch.rootPersonId = rootPersonId;
+        await branch.save();
 
         await logAudit({
             actorId: req.user.id,
-            action: "CREATE",
+            action: "SET_ROOT",
             entityType: "Branch",
             entityId: branch._id,
             branchId: branch._id,
-            after: branch
+            after: { rootPersonId }
         }, req);
 
-        return success(res, branch, null, 201);
+        return success(res, branch);
     } catch (err) {
         return error(res, err);
     }
 };
 
-// Get Branch Details (MEMBER+)
+
+// ─── Get Branch Details ────────────────────────────────────────────────────────
 exports.getBranch = async (req, res) => {
     try {
         const branch = await Branch.findById(req.params.id).populate("ownerId", "fullName email");
@@ -78,8 +177,13 @@ exports.getBranch = async (req, res) => {
             return error(res, { code: "BRANCH_NOT_FOUND", message: "Branch not found" }, 404);
         }
 
-        const isOwner = branch.ownerId._id.toString() === req.user.id;
-        const isMember = branch.members.some(m => m.userId.toString() === req.user.id);
+        // FIX: safely handle both req.user.id (string) and req.user._id (ObjectId)
+        const uid = req.user.id || (req.user._id && req.user._id.toString());
+        // FIX: ownerId may be populated (has ._id) or a raw ObjectId reference
+        const isOwner = branch.ownerId._id
+            ? branch.ownerId._id.toString() === uid
+            : branch.ownerId.toString() === uid;
+        const isMember = branch.members.some(m => m.userId.toString() === uid);
         const isAdmin = req.user.role === "admin";
 
         if (!isOwner && !isMember && !isAdmin) {
@@ -92,7 +196,7 @@ exports.getBranch = async (req, res) => {
     }
 };
 
-// Update Branch (ADMIN/EDITOR)
+// ─── Update Branch ─────────────────────────────────────────────────────────────
 exports.updateBranch = async (req, res) => {
     try {
         const originalBranch = await Branch.findById(req.params.id);
@@ -128,13 +232,37 @@ exports.updateBranch = async (req, res) => {
     }
 };
 
-// Delete Branch (ADMIN)
+// ─── Delete Branch (ADMIN only) — cascades all related data ───────────────────
 exports.deleteBranch = async (req, res) => {
     try {
-        const branch = await Branch.findByIdAndDelete(req.params.id);
+        const branchId = req.params.id;
+
+        const branch = await Branch.findById(branchId);
         if (!branch) {
             return error(res, { code: "BRANCH_NOT_FOUND", message: "Branch not found" }, 404);
         }
+
+        // ── Cascade Step 1: Delete Relationships ──────────────────────────────
+        await Relationship.deleteMany({ branchId });
+
+        // ── Cascade Step 2: Delete Media (and physical files) ──────────────
+        const mediaList = await Media.find({ branchId });
+        // FIX: use async Promise.all instead of sync for-loop (no event-loop blocking)
+        await Promise.all(mediaList.map(async (m) => {
+            if (m.storagePath) {
+                try { await fsPromises.unlink(m.storagePath); } catch (_) { /* ignore missing files */ }
+            }
+        }));
+        await Media.deleteMany({ branchId });
+
+        // ── Cascade Step 3: Delete Events ─────────────────────────────────────
+        await Event.deleteMany({ branchId });
+
+        // ── Cascade Step 4: Delete Persons ────────────────────────────────────
+        await Person.deleteMany({ branchId });
+
+        // ── Finally: Delete the Branch itself ─────────────────────────────────
+        await Branch.findByIdAndDelete(branchId);
 
         await logAudit({
             actorId: req.user.id,
@@ -145,13 +273,13 @@ exports.deleteBranch = async (req, res) => {
             before: branch
         }, req);
 
-        return success(res, { message: "Branch deleted" });
+        return success(res, { message: "Branch and all related data deleted" });
     } catch (err) {
         return error(res, err);
     }
 };
 
-// Add Member (ADMIN/EDITOR)
+// ─── Add Member (ADMIN / branch owner or editor) ──────────────────────────────
 exports.addMember = async (req, res) => {
     try {
         const { userId, roleInBranch } = req.body;
@@ -190,7 +318,7 @@ exports.addMember = async (req, res) => {
     }
 };
 
-// Remove Member (ADMIN/EDITOR)
+// ─── Remove Member ─────────────────────────────────────────────────────────────
 exports.removeMember = async (req, res) => {
     try {
         const { userId } = req.params;
@@ -220,7 +348,7 @@ exports.removeMember = async (req, res) => {
     }
 };
 
-// List Members (ADMIN/EDITOR)
+// ─── List Members ──────────────────────────────────────────────────────────────
 exports.listMembers = async (req, res) => {
     try {
         const branch = await Branch.findById(req.params.id).populate("members.userId", "fullName email");

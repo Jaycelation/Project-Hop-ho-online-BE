@@ -15,6 +15,8 @@ const BranchSchema = new mongoose.Schema(
         description: { type: String, default: "" },
         ownerId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
         members: { type: [BranchMemberSchema], default: [] },
+        // Root person (thủy tổ) of this branch — set atomically on creation or later
+        rootPersonId: { type: mongoose.Schema.Types.ObjectId, ref: "Person", default: null },
     },
     { timestamps: true }
 );

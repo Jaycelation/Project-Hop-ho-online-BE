@@ -20,6 +20,7 @@ const PersonSchema = new mongoose.Schema(
 
         createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
         updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+        linkedUserId: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
     },
     { timestamps: true }
 );

@@ -9,6 +9,9 @@ const logAudit = require("../utils/auditLogger");
 const securityGuard = require("../utils/securityGuard");
 const { filterPersonsByPrivacy } = require("../utils/privacyFilter");
 
+const { appendLunarDates } = require("../utils/dateHelpers");
+const { computeKinship } = require("../utils/kinshipHelpers");
+
 // Create Person
 exports.createPerson = async (req, res) => {
     try {
@@ -136,41 +139,19 @@ exports.getPerson = async (req, res) => {
             return error(res, { code: "PERSON_NOT_FOUND", message: "Person not found" }, 404);
         }
 
+        // BẢO MẬT: Giữ nguyên kiểm tra quyền
         const hasAccess = await securityGuard.checkPrivacy(person, req.user);
         if (!hasAccess) {
-            return error(res, { code: "FORBIDDEN_PRIVATE_RESOURCE", message: "You do not have access to this person" }, 403);
+            return error(res, { code: "FORBIDDEN", message: "You do not have access to this person" }, 403);
         }
+        const enrichedPerson = appendLunarDates(person);
 
-        return success(res, person);
+        return success(res, enrichedPerson);
     } catch (err) {
         return error(res, err);
     }
 };
 
-// List Persons 
-// Fix List Persons
-// exports.listPersons = async (req, res) => {
-//     try {
-//         const { branchId, fullName } = req.query;
-//         const page = parseInt(req.query.page) || 1;
-//         const limit = parseInt(req.query.limit) || 20;
-
-//         let query = {};
-//         if (branchId) query.branchId = branchId;
-//         if (fullName) query.fullName = { $regex: fullName, $options: "i" };
-
-//         const persons = await Person.find(query)
-//             .skip((page - 1) * limit)
-//             .limit(limit)
-//             .sort({ fullName: 1 });
-
-//         const total = await Person.countDocuments(query);
-
-//         return success(res, persons, { page, limit, total, totalPages: Math.ceil(total / limit) });
-//     } catch (err) {
-//         return error(res, err);
-//     }
-// };
 // List Persons
 exports.listPersons = async (req, res) => {
     try {
@@ -681,6 +662,31 @@ exports.getDescendants = async (req, res) => {
         const safePeople = await filterPersonsByPrivacy(people, securityGuard, req.user);
         return success(res, safePeople);
 
+    } catch (err) {
+        return error(res, err);
+    }
+};
+
+
+exports.getKinship = async (req, res) => {
+    try {
+        const { id, targetId } = req.params;
+        const personA = await Person.findById(id);
+        const personB = await Person.findById(targetId);
+        
+        if (!personA || !personB) return error(res, { code: "NOT_FOUND", message: "Không tìm thấy người dùng" }, 404);
+
+        const hasAccessA = await securityGuard.checkPrivacy(personA, req.user);
+        const hasAccessB = await securityGuard.checkPrivacy(personB, req.user);
+        if (!hasAccessA || !hasAccessB) return error(res, { code: "FORBIDDEN", message: "Không có quyền truy cập" }, 403);
+
+        const allPersons = await Person.find({ branchId: personA.branchId }).lean();
+        const allRels = await Relationship.find({ branchId: personA.branchId }).lean();
+
+        const result = computeKinship(personA, personB, allPersons, allRels);
+        if (!result) return success(res, { message: "Không có quan hệ huyết thống/hôn nhân" });
+        
+        return success(res, result);
     } catch (err) {
         return error(res, err);
     }

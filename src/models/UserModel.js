@@ -2,7 +2,8 @@ const mongoose = require("mongoose");
 
 const UserSchema = new mongoose.Schema(
     {
-        email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+        username: { type: String, required: true, unique: true, trim: true },
+        email: { type: String, default: "", lowercase: true, trim: true },
         passwordHash: { type: String, required: true },
         fullName: { type: String, default: "" },
         phone: { type: String, default: "" },
@@ -16,6 +17,8 @@ const UserSchema = new mongoose.Schema(
         },
         isBanned: { type: Boolean, default: false },
         lastLoginAt: { type: Date, default: null },
+        isFirstLogin: { type: Boolean, default: true },
+        linkedPersonId: { type: mongoose.Schema.Types.ObjectId, ref: "Person", default: null },
     },
     { timestamps: true }
 );

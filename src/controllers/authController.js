@@ -27,23 +27,24 @@ const generateTokens = async (user, ip, userAgent) => {
     return { accessToken, refreshToken };
 };
 
-
 exports.register = async (req, res) => {
     try {
-        const { email, password, fullName } = req.body;
+        const { username, email, password, fullName } = req.body;
 
-        const existingUser = await User.findOne({ email });
+        const existingUser = await User.findOne({ username });
         if (existingUser) {
-            return error(res, { code: "AUTH_EMAIL_ALREADY_EXISTS", message: "Email already exists" }, 409);
+            return error(res, { code: "AUTH_USERNAME_ALREADY_EXISTS", message: "Username đã tồn tại" }, 409);
         }
 
         const passwordHash = await bcrypt.hash(password, 10);
 
         const newUser = await User.create({
-            email,
+            username,
+            email: email || "",
             passwordHash,
             fullName,
-            role: "member"
+            role: "member",
+            isFirstLogin: true
         });
 
         await logAudit({
@@ -51,10 +52,9 @@ exports.register = async (req, res) => {
             action: "REGISTER",
             entityType: "User",
             entityId: newUser._id,
-            after: { email: newUser.email, fullName: newUser.fullName }
+            after: { username: newUser.username, fullName: newUser.fullName }
         }, req);
 
-        // Auto-login after register
         const ip = req.ip || req.connection.remoteAddress;
         const userAgent = req.headers["user-agent"] || "";
         const { accessToken, refreshToken } = await generateTokens(newUser, ip, userAgent);
@@ -71,7 +71,13 @@ exports.register = async (req, res) => {
 
         return success(res, {
             accessToken,
-            user: { id: newUser._id, email: newUser.email, role: newUser.role, fullName: newUser.fullName }
+            user: { 
+                id: newUser._id, 
+                username: newUser.username, 
+                role: newUser.role, 
+                fullName: newUser.fullName,
+                isFirstLogin: newUser.isFirstLogin
+            }
         }, null, 201);
     } catch (err) {
         return error(res, err);
@@ -80,20 +86,20 @@ exports.register = async (req, res) => {
 
 exports.login = async (req, res) => {
     try {
-        const { email, password } = req.body;
+        const { username, password } = req.body;
 
-        const user = await User.findOne({ email });
+        const user = await User.findOne({ username });
         if (!user) {
-            return error(res, { code: "AUTH_INVALID_CREDENTIALS", message: "Invalid email or password" }, 401);
+            return error(res, { code: "AUTH_INVALID_CREDENTIALS", message: "Sai tên đăng nhập hoặc mật khẩu" }, 401);
         }
 
         const isMatch = await bcrypt.compare(password, user.passwordHash);
         if (!isMatch) {
-            return error(res, { code: "AUTH_INVALID_CREDENTIALS", message: "Invalid email or password" }, 401);
+            return error(res, { code: "AUTH_INVALID_CREDENTIALS", message: "Sai tên đăng nhập hoặc mật khẩu" }, 401);
         }
 
         if (user.isBanned) {
-            return error(res, { code: "AUTH_USER_BANNED", message: "User is banned" }, 403);
+            return error(res, { code: "AUTH_USER_BANNED", message: "Tài khoản đã bị khóa" }, 403);
         }
 
         const ip = req.ip || req.connection.remoteAddress;
@@ -101,7 +107,6 @@ exports.login = async (req, res) => {
 
         const { accessToken, refreshToken } = await generateTokens(user, ip, userAgent);
 
-        // Update last login
         user.lastLoginAt = new Date();
         await user.save();
 
@@ -112,7 +117,6 @@ exports.login = async (req, res) => {
             entityId: user._id,
         }, req);
 
-        // Set refresh token in cookie
         res.cookie("refreshToken", refreshToken, {
             httpOnly: true,
             secure: process.env.NODE_ENV === "production",
@@ -120,7 +124,16 @@ exports.login = async (req, res) => {
             maxAge: 7 * 24 * 60 * 60 * 1000
         });
 
-        return success(res, { accessToken, user: { id: user._id, email: user.email, role: user.role, fullName: user.fullName } });
+        return success(res, { 
+            accessToken, 
+            user: { 
+                id: user._id, 
+                username: user.username, 
+                role: user.role, 
+                fullName: user.fullName,
+                isFirstLogin: user.isFirstLogin
+            } 
+        });
     } catch (err) {
         return error(res, err);
     }
@@ -191,6 +204,28 @@ exports.logout = async (req, res) => {
 
         res.clearCookie("refreshToken");
         return success(res, { message: "Logged out successfully" });
+    } catch (err) {
+        return error(res, err);
+    }
+};
+
+exports.changePasswordMandatory = async (req, res, next) => {
+    try {
+        const { oldPassword, newPassword } = req.body;
+        const user = await User.findById(req.user.id);
+
+        if (!user) return error(res, { code: "NOT_FOUND", message: "User not found" }, 404);
+
+        const isMatch = await bcrypt.compare(oldPassword, user.passwordHash);
+        if (!isMatch) {
+            return error(res, { code: "AUTH_INVALID_CREDENTIALS", message: "Mật khẩu hiện tại không đúng" }, 401);
+        }
+
+        user.passwordHash = await bcrypt.hash(newPassword, 10);
+        user.isFirstLogin = false;
+        await user.save();
+
+        return success(res, { message: "Đổi mật khẩu thành công!" });
     } catch (err) {
         return error(res, err);
     }

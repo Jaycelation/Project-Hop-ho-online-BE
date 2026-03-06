@@ -11,7 +11,8 @@ const BranchMemberSchema = new mongoose.Schema(
 
 const BranchSchema = new mongoose.Schema(
     {
-        name: { type: String, required: true, trim: true, index: true },
+        name: { type: String, required: true },
+        branchCode: { type: String, required: true, unique: true },
         description: { type: String, default: "" },
         ownerId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
         members: { type: [BranchMemberSchema], default: [] },

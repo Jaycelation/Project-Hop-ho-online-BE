@@ -23,6 +23,8 @@ router.get("/:id/ancestors", verifyToken, personController.getAncestors);
 // Get Descendants
 router.get("/:id/descendants", verifyToken, personController.getDescendants);
 
+router.get("/:id/kinship/:targetId", verifyToken, personController.getKinship);
+
 // Update Person (EDITOR+)
 router.put("/:id", verifyToken, authorizeRoles("admin", "editor"), validate(updatePersonSchema), personController.updatePerson);
 

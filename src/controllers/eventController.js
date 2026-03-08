@@ -2,22 +2,23 @@ const Event = require("../models/EventModel");
 const { success, error } = require("../utils/responseHandler");
 const logAudit = require("../utils/auditLogger");
 const securityGuard = require("../utils/securityGuard");
+const { solarToLunar, lunarToSolar } = require("../utils/lunarHelper");
 
 exports.createEvent = async (req, res) => {
     try {
         const { branchId, title, type, eventDate, location, description, personIds, privacy } = req.body;
 
-        const event = await Event.create({
-            branchId,
-            title,
-            type,
-            eventDate,
-            location,
-            description,
-            personIds,
-            privacy,
-            createdBy: req.user.id
-        });
+        let eventData = { branchId, title, type, eventDate, location, description, personIds, privacy, createdBy: req.user.id };
+
+        if (eventDate && !req.body.lunarEventDate) {
+            eventData.lunarEventDate = await solarToLunar(eventDate);
+        } else if (req.body.lunarEventDate && !eventDate) {
+            const { day, month, year, isLeap } = req.body.lunarEventDate;
+            const solar = await lunarToSolar(day, month, year, isLeap);
+            if (solar) eventData.eventDate = solar;
+        }
+
+        const event = await Event.create(eventData);
 
         await logAudit({
             actorId: req.user.id,

@@ -53,10 +53,11 @@ exports.listBranches = async (req, res) => {
 // Create Branch (ADMIN/EDITOR)
 exports.createBranch = async (req, res) => {
     try {
-        const { name, description } = req.body;
+        const { name, branchCode, description } = req.body;
 
         const branch = await Branch.create({
             name,
+            branchCode,
             description,
             ownerId: req.user.id,
             members: []
@@ -101,6 +102,7 @@ exports.getBranch = async (req, res) => {
 };
 
 // Update Branch (ADMIN/EDITOR)
+// Update Branch (ADMIN/EDITOR)
 exports.updateBranch = async (req, res) => {
     try {
         const originalBranch = await Branch.findById(req.params.id);
@@ -108,10 +110,10 @@ exports.updateBranch = async (req, res) => {
             return error(res, { code: "BRANCH_NOT_FOUND", message: "Branch not found" }, 404);
         }
 
-        // Only allow safe fields — prevent changing ownerId or members via this endpoint
-        const { name, description } = req.body;
+        const { name, branchCode, description } = req.body;
         const updateFields = {};
         if (name !== undefined) updateFields.name = name;
+        if (branchCode !== undefined) updateFields.branchCode = branchCode; 
         if (description !== undefined) updateFields.description = description;
 
         const branch = await Branch.findByIdAndUpdate(

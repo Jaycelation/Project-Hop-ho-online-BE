@@ -5,7 +5,61 @@ const { success, error } = require("../utils/responseHandler");
 const logAudit = require("../utils/auditLogger");
 const securityGuard = require("../utils/securityGuard");
 
-exports.uploadMedia = async (req, res) => {
+const formatMediaResponse = (req, m) => {
+    const baseUrl = `${req.protocol}://${req.get("host")}`;
+    const fileName = path.basename(m.storagePath);
+    const url = `${baseUrl}/storage/uploads/${fileName}`;
+
+    const obj = m.toObject();
+    return {
+        ...obj,
+        id: obj._id,
+        url: url,
+        type: obj.kind,
+        title: obj.caption || obj.originalName
+    };
+};
+
+exports.listMedia = async (req, res, next) => {
+    try {
+        const { branchId, personId, eventId, kind } = req.query;
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 20;
+
+        const query = {};
+        if (branchId) query.branchId = branchId;
+        if (personId) query.personId = personId;
+        if (eventId) query.eventId = eventId;
+        if (kind) query.kind = kind;
+
+        const media = await Media.find(query)
+            .skip((page - 1) * limit)
+            .limit(limit)
+            .sort({ createdAt: -1 });
+
+        // Filter by privacy
+        const filtered = [];
+        for (const m of media) {
+            const hasAccess = await securityGuard.checkPrivacy(m, req.user);
+            if (hasAccess) filtered.push(formatMediaResponse(req, m));
+        }
+
+        const totalBeforeFilter = await Media.countDocuments(query);
+        const total = filtered.length;
+
+        return success(res, filtered, {
+            page,
+            limit,
+            total,
+            totalBeforeFilter,
+            totalPages: Math.ceil(totalBeforeFilter / limit)
+        });
+    } catch (err) {
+        next(err);
+    }
+};
+
+exports.uploadMedia = async (req, res, next) => {
     try {
         if (!req.file) {
             return error(res, { code: "NO_FILE", message: "No file uploaded" }, 400);
@@ -38,33 +92,17 @@ exports.uploadMedia = async (req, res) => {
             after: media
         }, req);
 
-        return success(res, media, null, 201);
+        return success(res, formatMediaResponse(req, media), null, 201);
     } catch (err) {
         // Cleanup file if DB insert fails
         if (req.file) {
             fs.unlink(req.file.path, () => { });
         }
-        return error(res, err);
+        next(err);
     }
 };
 
-exports.listMedia = async (req, res) => {
-    try {
-        const { kind, branchId } = req.query;
-        const filter = {};
-        
-        if (kind) filter.kind = kind;
-        if (branchId) filter.branchId = branchId;
-
-        const mediaList = await Media.find(filter).sort({ createdAt: -1 });
-
-        return success(res, mediaList);
-    } catch (err) {
-        return error(res, err);
-    }
-};
-
-exports.getMedia = async (req, res) => {
+exports.getMedia = async (req, res, next) => {
     try {
         const media = await Media.findById(req.params.id);
         if (!media) return error(res, { code: "NOT_FOUND", message: "Media not found" }, 404);
@@ -74,16 +112,35 @@ exports.getMedia = async (req, res) => {
             return error(res, { code: "FORBIDDEN_PRIVATE_RESOURCE", message: "You do not have access to this media" }, 403);
         }
 
-        return success(res, media);
+        return success(res, formatMediaResponse(req, media));
     } catch (err) {
-        return error(res, err);
+        next(err);
     }
 };
 
-exports.updateMedia = async (req, res) => {
+exports.updateMedia = async (req, res, next) => {
     try {
         const originalMedia = await Media.findById(req.params.id);
         if (!originalMedia) return error(res, { code: "NOT_FOUND", message: "Media not found" }, 404);
+
+        // Write permission check
+        const isUploader = originalMedia.uploadedBy && originalMedia.uploadedBy.toString() === req.user.id;
+        const isAdmin = req.user.role === "admin";
+
+        let isBranchEditorOrOwner = false;
+        if (originalMedia.branchId) {
+            const branch = await require("../models/BranchModel").findById(originalMedia.branchId);
+            if (branch) {
+                const member = branch.members.find(m => m.userId.toString() === req.user.id);
+                if (branch.ownerId.toString() === req.user.id || (member && (member.roleInBranch === "editor" || member.roleInBranch === "owner"))) {
+                    isBranchEditorOrOwner = true;
+                }
+            }
+        }
+
+        if (!isUploader && !isAdmin && !isBranchEditorOrOwner) {
+            return error(res, { code: "FORBIDDEN_PRIVATE_RESOURCE", message: "You do not have access to modify this media" }, 403);
+        }
 
         // Only allow safe fields to be updated
         const { caption, privacy, personId, eventId } = req.body;
@@ -109,16 +166,36 @@ exports.updateMedia = async (req, res) => {
             after: media
         }, req);
 
-        return success(res, media);
+        return success(res, formatMediaResponse(req, media));
     } catch (err) {
-        return error(res, err);
+        next(err);
     }
 };
 
-exports.deleteMedia = async (req, res) => {
+exports.deleteMedia = async (req, res, next) => {
     try {
         const media = await Media.findById(req.params.id);
         if (!media) return error(res, { code: "NOT_FOUND", message: "Media not found" }, 404);
+
+        // Write permission check
+        const isUploader = media.uploadedBy && media.uploadedBy.toString() === req.user.id;
+        const isAdmin = req.user.role === "admin";
+
+        // Let's assume branch owner/editor can also delete media in their branch
+        let isBranchEditorOrOwner = false;
+        if (media.branchId) {
+            const branch = await require("../models/BranchModel").findById(media.branchId);
+            if (branch) {
+                const member = branch.members.find(m => m.userId.toString() === req.user.id);
+                if (branch.ownerId.toString() === req.user.id || (member && (member.roleInBranch === "editor" || member.roleInBranch === "owner"))) {
+                    isBranchEditorOrOwner = true;
+                }
+            }
+        }
+
+        if (!isUploader && !isAdmin && !isBranchEditorOrOwner) {
+            return error(res, { code: "FORBIDDEN_PRIVATE_RESOURCE", message: "You do not have access to delete this media" }, 403);
+        }
 
         // Delete file from disk
         if (fs.existsSync(media.storagePath)) {
@@ -138,11 +215,11 @@ exports.deleteMedia = async (req, res) => {
 
         return success(res, { message: "Media deleted" });
     } catch (err) {
-        return error(res, err);
+        next(err);
     }
 };
 
-exports.streamMedia = async (req, res) => {
+exports.streamMedia = async (req, res, next) => {
     try {
         const media = await Media.findById(req.params.id);
         if (!media) return error(res, { code: "NOT_FOUND", message: "Media not found" }, 404);
@@ -188,6 +265,6 @@ exports.streamMedia = async (req, res) => {
             fs.createReadStream(filePath).pipe(res);
         }
     } catch (err) {
-        return error(res, err);
+        next(err);
     }
 };

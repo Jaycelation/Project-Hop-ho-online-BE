@@ -7,7 +7,21 @@ const PersonSchema = new mongoose.Schema(
         fullName: { type: String, required: true, trim: true, index: true },
         gender: { type: String, enum: ["male", "female", "other", "unknown"], default: "unknown" },
         dateOfBirth: { type: Date, default: null },
+        // Thêm từ src_fix
+        lunarBirthDate: {
+            day: { type: Number, default: null },
+            month: { type: Number, default: null },
+            year: { type: Number, default: null },
+            isLeap: { type: Boolean, default: false }
+        },
         dateOfDeath: { type: Date, default: null },
+        // Thêm từ src_fix
+        lunarDeathDate: {
+            day: { type: Number, default: null },
+            month: { type: Number, default: null },
+            year: { type: Number, default: null },
+            isLeap: { type: Boolean, default: false }
+        },
         phone: { type: String, default: "" },
         address: { type: String, default: "" },
 
@@ -20,11 +34,14 @@ const PersonSchema = new mongoose.Schema(
 
         createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
         updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
-        linkedUserId: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+        linkedUserId: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null, index: true },
     },
     { timestamps: true }
 );
 
 PersonSchema.index({ fullName: "text", note: "text" });
+PersonSchema.index({ "lunarBirthDate.month": 1 });
+PersonSchema.index({ "lunarDeathDate.month": 1 });
+PersonSchema.index({ createdAt: -1 });
 
 module.exports = mongoose.model("Person", PersonSchema);

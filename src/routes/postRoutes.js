@@ -1,12 +1,32 @@
 const express = require("express");
-const router = express.Router();
-const moderationController = require("../controllers/moderationController");
 const { verifyToken } = require("../middlewares/authMiddleware");
+const postController = require("../controllers/postController");
+const validate = require("../middlewares/validate");
+const { createPostSchema, updatePostSchema, commentSchema } = require("../validators/postValidator");
 
-// Đăng bài viết mới (Mặc định sẽ vào trạng thái 'pending')
-router.post("/", verifyToken, moderationController.createPost);
+const router = express.Router();
 
-// Lấy danh sách bài viết đã duyệt ('approved') để hiển thị trên Home
-router.get("/", verifyToken, moderationController.listPosts);
+router.use(verifyToken);
+
+// Quản lý Bài viết (Posts API)
+router.route("/")
+    .get(postController.getPosts)
+    .post(validate(createPostSchema), postController.createPost);
+
+router.route("/:id")
+    .put(validate(updatePostSchema), postController.updatePost)
+    .delete(postController.deletePost);
+
+// Tương tác (Likes & Comments)
+router.route("/:id/like")
+    .post(postController.toggleLikePost);
+
+router.route("/:id/comments")
+    .get(postController.getComments)
+    .post(validate(commentSchema), postController.addComment);
+
+router.route("/comments/:commentId")
+    .put(validate(commentSchema), postController.updateComment)
+    .delete(postController.deleteComment);
 
 module.exports = router;

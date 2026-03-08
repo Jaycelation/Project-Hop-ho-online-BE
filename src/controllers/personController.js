@@ -4,6 +4,7 @@ const Event = require("../models/EventModel");
 const Media = require("../models/MediaModel");
 const fs = require("fs");
 const mongoose = require("mongoose");
+const { solarToLunar, lunarToSolar } = require("../utils/lunarHelper");
 const { success, error } = require("../utils/responseHandler");
 const logAudit = require("../utils/auditLogger");
 const securityGuard = require("../utils/securityGuard");
@@ -16,20 +17,26 @@ const { computeKinship } = require("../utils/kinshipHelpers");
 exports.createPerson = async (req, res) => {
     try {
         const { branchId, fullName, gender, dateOfBirth, dateOfDeath, phone, address, privacy, note, generation } = req.body;
+        
+        let data = { branchId, fullName, gender, dateOfBirth, dateOfDeath, phone, address, privacy, note, generation, createdBy: req.user.id };
 
-        const person = await Person.create({
-            branchId,
-            fullName,
-            gender,
-            dateOfBirth,
-            dateOfDeath,
-            phone,
-            address,
-            privacy,
-            note,
-            generation,
-            createdBy: req.user.id
-        });
+        if (dateOfBirth && !req.body.lunarBirthDate) {
+            data.lunarBirthDate = await solarToLunar(dateOfBirth);
+        } else if (req.body.lunarBirthDate && !dateOfBirth) {
+            const { day, month, year, isLeap } = req.body.lunarBirthDate;
+            const solar = await lunarToSolar(day, month, year, isLeap);
+            if (solar) data.dateOfBirth = solar;
+        }
+
+        if (dateOfDeath && !req.body.lunarDeathDate) {
+            data.lunarDeathDate = await solarToLunar(dateOfDeath);
+        } else if (req.body.lunarDeathDate && !dateOfDeath) {
+            const { day, month, year, isLeap } = req.body.lunarDeathDate;
+            const solar = await lunarToSolar(day, month, year, isLeap);
+            if (solar) data.dateOfDeath = solar;
+        }
+
+        const person = await Person.create(data);
 
         await logAudit({
             actorId: req.user.id,

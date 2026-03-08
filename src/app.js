@@ -37,7 +37,8 @@ app.use("/api/search", searchRoutes);
 app.use("/api/audit", auditRoutes);
 app.use("/api/moderation", moderationRoutes);
 app.use("/api/posts", postRoutes);
-app.use("/api", systemRoutes); // For /api/health
+app.use("/api", systemRoutes);
+
 app.use("/api/calendar", require("./routes/calendarRoutes"));
 
 // Error Handler

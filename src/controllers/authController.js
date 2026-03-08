@@ -88,7 +88,9 @@ exports.login = async (req, res) => {
     try {
         const { username, password } = req.body;
 
-        const user = await User.findOne({ username });
+        const user = await User.findOne({ 
+            $or: [{ username: username }, { email: username }] 
+        });
         if (!user) {
             return error(res, { code: "AUTH_INVALID_CREDENTIALS", message: "Sai tên đăng nhập hoặc mật khẩu" }, 401);
         }
@@ -211,7 +213,8 @@ exports.logout = async (req, res) => {
 
 exports.changePasswordMandatory = async (req, res, next) => {
     try {
-        const { oldPassword, newPassword } = req.body;
+        const oldPassword = req.body.oldPassword || req.body.currentPassword;
+        const newPassword = req.body.newPassword;
         const user = await User.findById(req.user.id);
 
         if (!user) return error(res, { code: "NOT_FOUND", message: "User not found" }, 404);

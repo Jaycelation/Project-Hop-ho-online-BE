@@ -13,7 +13,8 @@ const Media = require("../models/MediaModel");
 // List branches (MEMBER+)
 exports.listBranches = async (req, res) => {
     try {
-        const { role, id } = req.user;
+        const role = req.user.role;
+        const id = req.user._id.toString();
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 20;
         const skip = (page - 1) * limit;

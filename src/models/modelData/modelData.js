@@ -4,9 +4,9 @@ async function buildModelData() {
     const passwordHash = await bcrypt.hash("123456", 10);
 
     const users = [
-        { email: "admin@gp.local", passwordHash, fullName: "Admin", role: "admin" },
-        { email: "editor@gp.local", passwordHash, fullName: "Editor", role: "editor" },
-        { email: "member@gp.local", passwordHash, fullName: "Member", role: "member" },
+        { username: "admin", email: "admin@gp.local", passwordHash, fullName: "Admin", role: "admin" },
+        { username: "editor", email: "editor@gp.local", passwordHash, fullName: "Editor", role: "editor" },
+        { username: "member", email: "member@gp.local", passwordHash, fullName: "Member", role: "member" },
     ];
 
     const branches = [

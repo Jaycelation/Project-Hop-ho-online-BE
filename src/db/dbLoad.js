@@ -20,20 +20,6 @@ async function connectDB() {
     console.log("MongoDB connected (dbLoad)");
 }
 
-async function clearCollections() {
-    await Promise.all([
-        User.deleteMany({}),
-        Branch.deleteMany({}),
-        Person.deleteMany({}),
-        Relationship.deleteMany({}),
-        Event.deleteMany({}),
-        Media.deleteMany({}),
-        AuditLog.deleteMany({}),
-        RefreshToken.deleteMany({}),
-    ]);
-    console.log("Cleared collections");
-}
-
 function mustGet(map, key, label) {
     const v = map.get(key);
     if (!v) throw new Error(`Missing ${label}: ${key}`);
@@ -43,50 +29,85 @@ function mustGet(map, key, label) {
 (async () => {
     try {
         await connectDB();
-
         const { users, branches, persons, relationships, events, media } = await buildModelData();
 
-        // 1) reset DB
-        await clearCollections();
+        console.log("Recovery Mode: Đang khôi phục kết nối dữ liệu...");
 
-        // 2) insert Users
-        const insertedUsers = await User.insertMany(users);
+        // 1) KHÔI PHỤC USER: Tìm theo EMAIL, gán username cho user cũ và xóa clone
+        const insertedUsers = [];
+        for (const u of users) {
+            // Tìm tất cả user có cùng email, sắp xếp cũ nhất lên đầu
+            const existing = await User.find({ email: u.email }).sort({ createdAt: 1 });
+            
+            let user;
+            if (existing.length > 0) {
+                user = existing[0]; // Lấy nick cũ nhất (nick đang sở hữu toàn bộ gia phả cũ)
+                user.username = u.username; // Cập nhật username mới
+                await user.save();
+                
+                // Xóa các nick clone do script lần trước lỡ tạo ra
+                if (existing.length > 1) {
+                    for (let i = 1; i < existing.length; i++) {
+                        await User.findByIdAndDelete(existing[i]._id);
+                    }
+                }
+            } else {
+                user = await User.create(u);
+            }
+            insertedUsers.push(user);
+        }
         const userByEmail = new Map(insertedUsers.map((u) => [u.email, u]));
 
-        // 3) insert Branches (resolve ownerEmail -> ownerId) + add members
-        const branchDocs = branches.map((b) => {
-            const owner = mustGet(userByEmail, b.ownerEmail, "owner user by email");
-            return {
-                name: b.name,
-                description: b.description,
-                ownerId: owner._id,
-                members: [
-                    { userId: owner._id, roleInBranch: "owner" },
-                    { userId: mustGet(userByEmail, "editor@gp.local", "editor")._id, roleInBranch: "editor" },
-                    { userId: mustGet(userByEmail, "member@gp.local", "member")._id, roleInBranch: "viewer" },
-                ],
-            };
-        });
+        // 2) KHÔI PHỤC BRANCH: Thêm branchCode cho các branch cũ nếu đang thiếu
+        const insertedBranches = [];
+        for (let i = 0; i < branches.length; i++) {
+            const b = branches[i];
+            let branch = await Branch.findOne({ name: b.name });
 
-        const insertedBranches = await Branch.insertMany(branchDocs);
+            if (branch) {
+                // Nếu branch cũ chưa có branchCode, update luôn cho nó
+                if (!branch.branchCode) {
+                    branch.branchCode = `BR_${Date.now()}_${i}`;
+                    await branch.save();
+                }
+            } else {
+                // Tạo mới nếu chưa có
+                const owner = mustGet(userByEmail, b.ownerEmail, "owner user by email");
+                branch = await Branch.create({
+                    name: b.name,
+                    branchCode: `BR_${Date.now()}_${i}`,
+                    description: b.description,
+                    ownerId: owner._id,
+                    members: [
+                        { userId: owner._id, roleInBranch: "owner" },
+                        { userId: mustGet(userByEmail, "editor@gp.local", "editor")._id, roleInBranch: "editor" },
+                        { userId: mustGet(userByEmail, "member@gp.local", "member")._id, roleInBranch: "viewer" },
+                    ],
+                });
+            }
+            insertedBranches.push(branch);
+        }
         const branchByName = new Map(insertedBranches.map((b) => [b.name, b]));
 
-        // 4) insert Persons (resolve branchName -> branchId, createdBy -> admin)
+        // 3) PERSONS (Chỉ nạp thêm nếu thiếu)
+        const insertedPersons = [];
         const admin = mustGet(userByEmail, "admin@gp.local", "admin");
-        const personDocs = persons.map((p) => {
+        for (const p of persons) {
             const br = mustGet(branchByName, p.branchName, "branch by name");
-            return {
-                branchId: br._id,
-                fullName: p.fullName,
-                gender: p.gender,
-                privacy: p.privacy,
-                note: p.note,
-                generation: p.generation ?? null,
-                createdBy: admin._id,
-            };
-        });
-
-        const insertedPersons = await Person.insertMany(personDocs);
+            let person = await Person.findOne({ fullName: p.fullName, branchId: br._id });
+            if (!person) {
+                person = await Person.create({
+                    branchId: br._id,
+                    fullName: p.fullName,
+                    gender: p.gender,
+                    privacy: p.privacy,
+                    note: p.note,
+                    generation: p.generation ?? null,
+                    createdBy: admin._id,
+                });
+            }
+            insertedPersons.push(person);
+        }
 
         const personKey = (branchName, fullName) => `${branchName}::${fullName}`;
         const personByKey = new Map();
@@ -96,94 +117,33 @@ function mustGet(map, key, label) {
             personByKey.set(personKey(brName, p.fullName), p);
         });
 
-        // 5) insert Relationships (resolve names -> ids)
-        const relationshipDocs = relationships.map((r) => {
+        // 4) RELATIONSHIPS
+        for (const r of relationships) {
             const br = mustGet(branchByName, r.branchName, "branch by name");
             const from = mustGet(personByKey, personKey(r.branchName, r.fromName), "from person");
             const to = mustGet(personByKey, personKey(r.branchName, r.toName), "to person");
-            return {
-                branchId: br._id,
-                fromPersonId: from._id,
-                toPersonId: to._id,
-                type: r.type,
-                createdBy: admin._id,
-            };
-        });
-
-        await Relationship.insertMany(relationshipDocs);
-
-        // 6) insert Events (resolve personNames -> personIds)
-        const eventDocs = events.map((e) => {
-            const br = mustGet(branchByName, e.branchName, "branch by name");
-            const personIds = (e.personNames || []).map((n) => mustGet(personByKey, personKey(e.branchName, n), "event person")._id);
-            return {
-                branchId: br._id,
-                title: e.title,
-                type: e.type,
-                eventDate: e.eventDate ?? null,
-                location: e.location ?? "",
-                description: e.description ?? "",
-                privacy: e.privacy ?? "internal",
-                personIds,
-                createdBy: admin._id,
-            };
-        });
-
-        const insertedEvents = await Event.insertMany(eventDocs);
-        const eventByTitleKey = new Map(insertedEvents.map((ev) => [`${ev.branchId}::${ev.title}`, ev]));
-
-        // 7) insert Media (resolve personName/eventTitle -> ids)
-        const mediaDocs = media.map((m) => {
-            const br = mustGet(branchByName, m.branchName, "branch by name");
-
-            let personId = null;
-            if (m.personName) {
-                personId = mustGet(personByKey, personKey(m.branchName, m.personName), "media person")._id;
+            
+            const relExists = await Relationship.findOne({ branchId: br._id, fromPersonId: from._id, toPersonId: to._id, type: r.type });
+            if (!relExists) {
+                await Relationship.create({
+                    branchId: br._id,
+                    fromPersonId: from._id,
+                    toPersonId: to._id,
+                    type: r.type,
+                    createdBy: admin._id,
+                });
             }
-
-            let eventId = null;
-            if (m.eventTitle) {
-                const ev = eventByTitleKey.get(`${br._id}::${m.eventTitle}`);
-                if (!ev) throw new Error(`Missing event for media: ${m.eventTitle}`);
-                eventId = ev._id;
-            }
-
-            return {
-                branchId: br._id,
-                personId,
-                eventId,
-                kind: m.kind,
-                originalName: m.originalName,
-                mimeType: m.mimeType,
-                sizeBytes: m.sizeBytes,
-                storagePath: m.storagePath,
-                hlsPath: m.hlsPath ?? "",
-                privacy: m.privacy ?? "internal",
-                uploadedBy: admin._id,
-            };
-        });
-
-        const insertedMedia = await Media.insertMany(mediaDocs);
-
-        const nguyenBranch = branchByName.get("Chi nhánh Họ Nguyễn");
-        const a = personByKey.get(personKey("Chi nhánh Họ Nguyễn", "Nguyễn Văn A"));
-        const avatar = insertedMedia.find((x) => String(x.personId) === String(a._id) && x.kind === "image");
-        if (nguyenBranch && a && avatar) {
-            await Person.updateOne({ _id: a._id }, { $set: { avatarMediaId: avatar._id } });
         }
 
-        console.log("Seed done!");
-        console.log(`Users: ${insertedUsers.length}`);
-        console.log(`Branches: ${insertedBranches.length}`);
-        console.log(`Persons: ${insertedPersons.length}`);
-        console.log(`Events: ${insertedEvents.length}`);
-        console.log(`Media: ${insertedMedia.length}`);
-
+        console.log("✅ KHÔI PHỤC HOÀN TẤT!");
+        console.log("👉 Dữ liệu cũ đã được kết nối lại với tài khoản.");
+        console.log("👉 Hãy đăng nhập lại với username: 'admin' và password: '123456'");
+        
         await mongoose.disconnect();
         process.exit(0);
     } catch (err) {
         console.error("dbLoad failed:", err);
-        try { await mongoose.disconnect(); } catch (_) { }
+        try { await mongoose.disconnect(); } catch (_) {}
         process.exit(1);
     }
 })();

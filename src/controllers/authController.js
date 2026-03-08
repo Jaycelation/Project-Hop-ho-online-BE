@@ -5,26 +5,42 @@ const User = require("../models/UserModel");
 const RefreshToken = require("../models/RefreshTokenModel");
 const { success, error } = require("../utils/responseHandler");
 const logAudit = require("../utils/auditLogger");
+const {
+    getJwtSecret,
+    hashToken,
+    getCookieOptions,
+    getJwtSignOptions,
+    getRefreshTokenTtlMs,
+} = require("../utils/securityConfig");
+
+const buildUserPayload = (user) => ({
+    id: user._id,
+    username: user.username,
+    role: user.role,
+    fullName: user.fullName,
+    isFirstLogin: user.isFirstLogin,
+});
 
 const generateTokens = async (user, ip, userAgent) => {
     const accessToken = jwt.sign(
         { id: user._id, role: user.role },
-        process.env.JWT_SECRET || "secret",
-        { expiresIn: "15m" }
+        getJwtSecret(),
+        getJwtSignOptions()
     );
 
     const refreshToken = crypto.randomBytes(40).toString("hex");
-    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+    const refreshTokenHash = hashToken(refreshToken);
+    const expiresAt = new Date(Date.now() + getRefreshTokenTtlMs());
 
     await RefreshToken.create({
         userId: user._id,
-        tokenHash: refreshToken,
+        tokenHash: refreshTokenHash,
         expiresAt,
         ip,
         userAgent
     });
 
-    return { accessToken, refreshToken };
+    return { accessToken, refreshToken, refreshTokenHash };
 };
 
 exports.register = async (req, res) => {
@@ -62,22 +78,11 @@ exports.register = async (req, res) => {
         newUser.lastLoginAt = new Date();
         await newUser.save();
 
-        res.cookie("refreshToken", refreshToken, {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === "production",
-            sameSite: "strict",
-            maxAge: 7 * 24 * 60 * 60 * 1000
-        });
+        res.cookie("refreshToken", refreshToken, getCookieOptions());
 
         return success(res, {
             accessToken,
-            user: { 
-                id: newUser._id, 
-                username: newUser.username, 
-                role: newUser.role, 
-                fullName: newUser.fullName,
-                isFirstLogin: newUser.isFirstLogin
-            }
+            user: buildUserPayload(newUser)
         }, null, 201);
     } catch (err) {
         return error(res, err);
@@ -88,8 +93,8 @@ exports.login = async (req, res) => {
     try {
         const { username, password } = req.body;
 
-        const user = await User.findOne({ 
-            $or: [{ username: username }, { email: username }] 
+        const user = await User.findOne({
+            $or: [{ username }, { email: username }]
         });
         if (!user) {
             return error(res, { code: "AUTH_INVALID_CREDENTIALS", message: "Sai tên đăng nhập hoặc mật khẩu" }, 401);
@@ -119,22 +124,11 @@ exports.login = async (req, res) => {
             entityId: user._id,
         }, req);
 
-        res.cookie("refreshToken", refreshToken, {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === "production",
-            sameSite: "strict",
-            maxAge: 7 * 24 * 60 * 60 * 1000
-        });
+        res.cookie("refreshToken", refreshToken, getCookieOptions());
 
-        return success(res, { 
-            accessToken, 
-            user: { 
-                id: user._id, 
-                username: user.username, 
-                role: user.role, 
-                fullName: user.fullName,
-                isFirstLogin: user.isFirstLogin
-            } 
+        return success(res, {
+            accessToken,
+            user: buildUserPayload(user)
         });
     } catch (err) {
         return error(res, err);
@@ -148,7 +142,8 @@ exports.refresh = async (req, res) => {
             return error(res, { code: "AUTH_MISSING_REFRESH_TOKEN", message: "No refresh token provided" }, 401);
         }
 
-        const savedToken = await RefreshToken.findOne({ tokenHash: refreshToken });
+        const refreshTokenHash = hashToken(refreshToken);
+        const savedToken = await RefreshToken.findOne({ tokenHash: refreshTokenHash });
         if (!savedToken) {
             return error(res, { code: "AUTH_INVALID_REFRESH_TOKEN", message: "Invalid refresh token" }, 403);
         }
@@ -162,21 +157,19 @@ exports.refresh = async (req, res) => {
             return error(res, { code: "AUTH_USER_NOT_FOUND", message: "User not found" }, 404);
         }
 
-        // Rotate token
-        savedToken.revokedAt = new Date();
-        savedToken.replacedByTokenHash = "rotated";
-        await savedToken.save();
+        if (user.isBanned) {
+            return error(res, { code: "AUTH_USER_BANNED", message: "Tài khoản đã bị khóa" }, 403);
+        }
 
         const ip = req.ip || req.connection.remoteAddress;
         const userAgent = req.headers["user-agent"] || "";
-        const { accessToken, refreshToken: newRefreshToken } = await generateTokens(user, ip, userAgent);
+        const { accessToken, refreshToken: newRefreshToken, refreshTokenHash: newRefreshTokenHash } = await generateTokens(user, ip, userAgent);
 
-        res.cookie("refreshToken", newRefreshToken, {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === "production",
-            sameSite: "strict",
-            maxAge: 7 * 24 * 60 * 60 * 1000
-        });
+        savedToken.revokedAt = new Date();
+        savedToken.replacedByTokenHash = newRefreshTokenHash;
+        await savedToken.save();
+
+        res.cookie("refreshToken", newRefreshToken, getCookieOptions());
 
         return success(res, { accessToken });
 
@@ -190,7 +183,7 @@ exports.logout = async (req, res) => {
         const refreshToken = req.cookies.refreshToken;
         if (refreshToken) {
             await RefreshToken.findOneAndUpdate(
-                { tokenHash: refreshToken },
+                { tokenHash: hashToken(refreshToken) },
                 { revokedAt: new Date() }
             );
         }
@@ -204,7 +197,7 @@ exports.logout = async (req, res) => {
             }, req);
         }
 
-        res.clearCookie("refreshToken");
+        res.clearCookie("refreshToken", { ...getCookieOptions(), maxAge: undefined });
         return success(res, { message: "Logged out successfully" });
     } catch (err) {
         return error(res, err);
@@ -227,8 +220,10 @@ exports.changePasswordMandatory = async (req, res, next) => {
         user.passwordHash = await bcrypt.hash(newPassword, 10);
         user.isFirstLogin = false;
         await user.save();
+        await RefreshToken.updateMany({ userId: user._id, revokedAt: null }, { revokedAt: new Date() });
 
-        return success(res, { message: "Đổi mật khẩu thành công!" });
+        res.clearCookie("refreshToken", { ...getCookieOptions(), maxAge: undefined });
+        return success(res, { message: "Đổi mật khẩu thành công! Vui lòng đăng nhập lại." });
     } catch (err) {
         return error(res, err);
     }

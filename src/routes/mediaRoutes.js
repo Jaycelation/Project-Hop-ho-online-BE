@@ -1,21 +1,17 @@
 const express = require("express");
 const router = express.Router();
 const mediaController = require("../controllers/mediaController");
-const { verifyToken, authorizeRoles } = require("../middlewares/authMiddleware");
+const Media = require("../models/MediaModel");
+const { verifyToken, optionalVerifyToken, authorizeRoles, authorizeBranchAccess, authorizeResourceBranchAccess } = require("../middlewares/authMiddleware");
 const upload = require("../middlewares/uploadMiddleware");
 const validate = require("../middlewares/validate");
 const { uploadMediaSchema, updateMediaSchema } = require("../validators/mediaValidator");
 
-// Upload (file first via multer, then validate body fields)
-router.post("/upload", verifyToken, authorizeRoles("admin", "editor"), upload.single("file"), validate(uploadMediaSchema), mediaController.uploadMedia);
-
-// Meta Data
-router.get("/", verifyToken, mediaController.listMedia);
-router.get("/:id", verifyToken, mediaController.getMedia);
-router.put("/:id", verifyToken, authorizeRoles("admin", "editor"), validate(updateMediaSchema), mediaController.updateMedia);
-router.delete("/:id", verifyToken, authorizeRoles("admin", "editor"), mediaController.deleteMedia);
-
-// Stream
-router.get("/stream/:id", verifyToken, mediaController.streamMedia);
+router.post("/upload", verifyToken, authorizeRoles("admin", "editor"), authorizeBranchAccess("editor", { paths: ["body.branchId"] }), upload.single("file"), validate(uploadMediaSchema), mediaController.uploadMedia);
+router.get("/", verifyToken, authorizeBranchAccess("viewer", { paths: ["query.branchId"], optional: true }), mediaController.listMedia);
+router.get("/stream/:id", optionalVerifyToken, mediaController.streamMedia);
+router.get("/:id", verifyToken, authorizeResourceBranchAccess(Media, "viewer", { resourceName: "Media" }), mediaController.getMedia);
+router.put("/:id", verifyToken, authorizeRoles("admin", "editor"), authorizeResourceBranchAccess(Media, "editor", { resourceName: "Media" }), validate(updateMediaSchema), mediaController.updateMedia);
+router.delete("/:id", verifyToken, authorizeRoles("admin", "editor"), authorizeResourceBranchAccess(Media, "editor", { resourceName: "Media" }), mediaController.deleteMedia);
 
 module.exports = router;

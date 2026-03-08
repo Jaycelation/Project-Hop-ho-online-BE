@@ -3,6 +3,7 @@ const { success, error } = require("../utils/responseHandler");
 const logAudit = require("../utils/auditLogger");
 const securityGuard = require("../utils/securityGuard");
 const { solarToLunar, lunarToSolar } = require("../utils/lunarHelper");
+const { getAccessibleBranchIds } = require("../middlewares/authMiddleware");
 
 exports.createEvent = async (req, res) => {
     try {
@@ -43,8 +44,18 @@ exports.listEvents = async (req, res) => {
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 20;
 
-        let query = {};
-        if (branchId) query.branchId = branchId;
+        const accessibleBranchIds = await getAccessibleBranchIds(req.user, "viewer");
+        if (!accessibleBranchIds.length) {
+            return success(res, [], { page, limit, total: 0, totalPages: 0 });
+        }
+
+        let query = { branchId: { $in: accessibleBranchIds } };
+        if (branchId) {
+            if (!accessibleBranchIds.includes(branchId)) {
+                return error(res, { code: "FORBIDDEN_BRANCH_ACCESS", message: "Access denied to this branch" }, 403);
+            }
+            query.branchId = branchId;
+        }
         if (personId) query.personIds = personId;
         if (dateFrom || dateTo) {
             query.eventDate = {};
@@ -64,7 +75,7 @@ exports.listEvents = async (req, res) => {
             if (hasAccess) filtered.push(evt);
         }
 
-        const total = await Event.countDocuments(query);
+        const total = filtered.length;
 
         return success(res, filtered, { page, limit, total, totalPages: Math.ceil(total / limit) });
     } catch (err) {

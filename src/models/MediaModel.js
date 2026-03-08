@@ -16,6 +16,7 @@ const MediaSchema = new mongoose.Schema(
         hlsPath: { type: String, default: "" },
 
         privacy: { type: String, enum: ["public", "internal", "sensitive"], default: "internal", index: true },
+        status: { type: String, enum: ["pending", "approved", "rejected"], default: "pending", index: true },
 
         uploadedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
     },

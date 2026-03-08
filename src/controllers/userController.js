@@ -1,7 +1,9 @@
 const User = require("../models/UserModel");
+const Person = require("../models/PersonModel");
 const { success, error } = require("../utils/responseHandler");
 const logAudit = require("../utils/auditLogger");
 const bcrypt = require("bcrypt");
+const RefreshToken = require("../models/RefreshTokenModel");
 
 // Get current user profile
 exports.getMe = async (req, res) => {
@@ -73,6 +75,7 @@ exports.changePassword = async (req, res) => {
         // 3. Cập nhật DB
         user.passwordHash = hashedPassword;
         await user.save();
+        await RefreshToken.updateMany({ userId: user._id, revokedAt: null }, { revokedAt: new Date() });
 
         // 4. Ghi log
         await logAudit({

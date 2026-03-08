@@ -1,6 +1,7 @@
 const { z } = require("zod");
 
 const createPostSchema = z.object({
+    branchId: z.string().min(1, "branchId is required"),
     content: z.string().min(1, "Nội dung bài viết không được để trống").max(5000, "Nội dung quá dài (tối đa 5000 ký tự)"),
     feeling: z.string().optional(),
     image_url: z.string().url("Định dạng ảnh không hợp lệ").optional().or(z.literal("")),

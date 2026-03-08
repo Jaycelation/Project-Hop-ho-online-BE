@@ -12,6 +12,7 @@ const { filterPersonsByPrivacy } = require("../utils/privacyFilter");
 
 const { appendLunarDates } = require("../utils/dateHelpers");
 const { computeKinship } = require("../utils/kinshipHelpers");
+const { getAccessibleBranchIds } = require("../middlewares/authMiddleware");
 
 // Create Person
 exports.createPerson = async (req, res) => {
@@ -166,13 +167,21 @@ exports.listPersons = async (req, res) => {
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 20;
 
-        let query = {};
+        const accessibleBranchIds = await getAccessibleBranchIds(req.user, "viewer");
+        if (!accessibleBranchIds.length) {
+            return success(res, [], { page, limit, total: 0, totalPages: 0 });
+        }
+
+        let query = { branchId: { $in: accessibleBranchIds } };
         if (branchId) {
             if (!mongoose.Types.ObjectId.isValid(branchId)) {
                 return res.status(400).json({
                     success: false,
                     error: { code: "INVALID_BRANCH_ID", message: "Mã chi nhánh không hợp lệ" }
                 });
+            }
+            if (!accessibleBranchIds.includes(branchId)) {
+                return error(res, { code: "FORBIDDEN_BRANCH_ACCESS", message: "Access denied to this branch" }, 403);
             }
             query.branchId = branchId;
         }
@@ -198,7 +207,7 @@ exports.listPersons = async (req, res) => {
 
         const safePersons = await filterPersonsByPrivacy(persons, securityGuard, req.user);
 
-        const total = await Person.countDocuments(query);
+        const total = safePersons.length;
 
         return success(res, safePersons, { page, limit, total, totalPages: Math.ceil(total / limit) });
     } catch (err) {

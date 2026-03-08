@@ -1,29 +1,32 @@
 const express = require("express");
-const { verifyToken } = require("../middlewares/authMiddleware");
+const Post = require("../models/PostModel");
 const postController = require("../controllers/postController");
 const validate = require("../middlewares/validate");
+const {
+    verifyToken,
+    authorizeBranchAccess,
+    authorizeResourceBranchAccess,
+} = require("../middlewares/authMiddleware");
 const { createPostSchema, updatePostSchema, commentSchema } = require("../validators/postValidator");
 
 const router = express.Router();
 
 router.use(verifyToken);
 
-// Quản lý Bài viết (Posts API)
 router.route("/")
-    .get(postController.getPosts)
-    .post(validate(createPostSchema), postController.createPost);
+    .get(authorizeBranchAccess("viewer", { paths: ["query.branchId"], optional: true }), postController.getPosts)
+    .post(authorizeBranchAccess("viewer", { paths: ["body.branchId"] }), validate(createPostSchema), postController.createPost);
 
 router.route("/:id")
-    .put(validate(updatePostSchema), postController.updatePost)
-    .delete(postController.deletePost);
+    .put(authorizeResourceBranchAccess(Post, "viewer", { resourceName: "Post" }), validate(updatePostSchema), postController.updatePost)
+    .delete(authorizeResourceBranchAccess(Post, "viewer", { resourceName: "Post" }), postController.deletePost);
 
-// Tương tác (Likes & Comments)
 router.route("/:id/like")
-    .post(postController.toggleLikePost);
+    .post(authorizeResourceBranchAccess(Post, "viewer", { resourceName: "Post" }), postController.toggleLikePost);
 
 router.route("/:id/comments")
-    .get(postController.getComments)
-    .post(validate(commentSchema), postController.addComment);
+    .get(authorizeResourceBranchAccess(Post, "viewer", { resourceName: "Post" }), postController.getComments)
+    .post(authorizeResourceBranchAccess(Post, "viewer", { resourceName: "Post" }), validate(commentSchema), postController.addComment);
 
 router.route("/comments/:commentId")
     .put(validate(commentSchema), postController.updateComment)

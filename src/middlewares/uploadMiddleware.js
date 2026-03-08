@@ -16,19 +16,34 @@ const storage = multer.diskStorage({
     },
 });
 
-const fileFilter = (req, file, cb) => {
-    const allowedTypes = ["image/jpeg", "image/png", "image/gif", "video/mp4", "video/webm"];
-    if (allowedTypes.includes(file.mimetype)) {
-        cb(null, true);
-    } else {
-        cb(new Error("Invalid file type. Only images and videos are allowed."), false);
-    }
+const createUpload = ({ allowedTypes, errorMessage, fileSize = 50 * 1024 * 1024 }) => {
+    const fileFilter = (req, file, cb) => {
+        if (allowedTypes.includes(file.mimetype)) {
+            cb(null, true);
+        } else {
+            cb(new Error(errorMessage), false);
+        }
+    };
+
+    return multer({
+        storage,
+        limits: { fileSize },
+        fileFilter,
+    });
 };
 
-const upload = multer({
-    storage: storage,
-    limits: { fileSize: 50 * 1024 * 1024 }, // 50MB limit
-    fileFilter: fileFilter,
+const mediaUpload = createUpload({
+    allowedTypes: ["image/jpeg", "image/png", "image/gif", "video/mp4", "video/webm"],
+    errorMessage: "Invalid file type. Only images and videos are allowed.",
 });
 
-module.exports = upload;
+const csvUpload = createUpload({
+    allowedTypes: ["text/csv", "application/csv", "application/vnd.ms-excel"],
+    errorMessage: "Invalid file type. Only CSV files are allowed.",
+    fileSize: 10 * 1024 * 1024,
+});
+
+module.exports = mediaUpload;
+module.exports.mediaUpload = mediaUpload;
+module.exports.csvUpload = csvUpload;
+module.exports.createUpload = createUpload;

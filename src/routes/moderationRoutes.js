@@ -1,12 +1,9 @@
 const express = require("express");
 const router = express.Router();
 const moderationController = require("../controllers/moderationController");
-const { verifyToken } = require("../middlewares/authMiddleware");
+const { verifyToken, authorizeBranchAccess } = require("../middlewares/authMiddleware");
 
-// Lấy danh sách chờ duyệt (Post + Media)
-router.get("/pending", verifyToken, moderationController.getPending);
-
-// Phê duyệt hoặc từ chối
+router.get("/pending", verifyToken, authorizeBranchAccess("editor", { paths: ["query.branchId"], optional: true }), moderationController.getPending);
 router.put("/:id", verifyToken, moderationController.updateStatus);
 
 module.exports = router;

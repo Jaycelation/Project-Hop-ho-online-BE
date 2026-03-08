@@ -5,7 +5,7 @@ const morgan = require("morgan");
 const cookieParser = require("cookie-parser");
 const rateLimit = require("express-rate-limit");
 const path = require("path");
-
+app.use("/storage", express.static(path.join(__dirname, "..", "storage")));
 const app = express();
 
 app.set("trust proxy", 1);

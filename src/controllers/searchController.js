@@ -2,6 +2,8 @@ const Person = require("../models/PersonModel");
 const Event = require("../models/EventModel");
 const Branch = require("../models/BranchModel");
 const { success, error } = require("../utils/responseHandler");
+const securityGuard = require("../utils/securityGuard");
+const { getAccessibleBranchIds } = require("../middlewares/authMiddleware");
 
 exports.searchPersons = async (req, res) => {
     try {
@@ -13,20 +15,34 @@ exports.searchPersons = async (req, res) => {
             return error(res, { code: "MISSING_QUERY", message: "Query parameter 'q' is required" }, 400);
         }
 
-        let query = { $text: { $search: q } };
+        const accessibleBranchIds = await getAccessibleBranchIds(req.user, "viewer");
+        if (!accessibleBranchIds.length) {
+            return success(res, [], { page, limit, total: 0, totalPages: 0 });
+        }
 
-        if (branchId) query.branchId = branchId;
+        let query = { $text: { $search: q }, branchId: { $in: accessibleBranchIds } };
+
+        if (branchId) {
+            if (!accessibleBranchIds.includes(branchId)) {
+                return error(res, { code: "FORBIDDEN_BRANCH_ACCESS", message: "Access denied to this branch" }, 403);
+            }
+            query.branchId = branchId;
+        }
         if (privacy) query.privacy = privacy;
-        if (generation) query.generation = parseInt(generation);
+        if (generation) query.generation = parseInt(generation, 10);
 
         const persons = await Person.find(query, { score: { $meta: "textScore" } })
             .sort({ score: { $meta: "textScore" } })
             .skip((page - 1) * limit)
             .limit(limit);
 
-        const total = await Person.countDocuments(query);
+        const filtered = [];
+        for (const person of persons) {
+            const hasAccess = await securityGuard.checkPrivacy(person, req.user);
+            if (hasAccess) filtered.push(person);
+        }
 
-        return success(res, persons, { page, limit, total, totalPages: Math.ceil(total / limit) });
+        return success(res, filtered, { page, limit, total: filtered.length, totalPages: Math.ceil(filtered.length / limit) });
     } catch (err) {
         return error(res, err);
     }
@@ -42,17 +58,31 @@ exports.searchEvents = async (req, res) => {
             return error(res, { code: "MISSING_QUERY", message: "Query parameter 'q' is required" }, 400);
         }
 
-        let query = { $text: { $search: q } };
-        if (branchId) query.branchId = branchId;
+        const accessibleBranchIds = await getAccessibleBranchIds(req.user, "viewer");
+        if (!accessibleBranchIds.length) {
+            return success(res, [], { page, limit, total: 0, totalPages: 0 });
+        }
+
+        let query = { $text: { $search: q }, branchId: { $in: accessibleBranchIds } };
+        if (branchId) {
+            if (!accessibleBranchIds.includes(branchId)) {
+                return error(res, { code: "FORBIDDEN_BRANCH_ACCESS", message: "Access denied to this branch" }, 403);
+            }
+            query.branchId = branchId;
+        }
 
         const events = await Event.find(query, { score: { $meta: "textScore" } })
             .sort({ score: { $meta: "textScore" } })
             .skip((page - 1) * limit)
             .limit(limit);
 
-        const total = await Event.countDocuments(query);
+        const filtered = [];
+        for (const event of events) {
+            const hasAccess = await securityGuard.checkPrivacy(event, req.user);
+            if (hasAccess) filtered.push(event);
+        }
 
-        return success(res, events, { page, limit, total, totalPages: Math.ceil(total / limit) });
+        return success(res, filtered, { page, limit, total: filtered.length, totalPages: Math.ceil(filtered.length / limit) });
     } catch (err) {
         return error(res, err);
     }
@@ -68,13 +98,26 @@ exports.searchBranches = async (req, res) => {
             return error(res, { code: "MISSING_QUERY", message: "Query parameter 'q' is required" }, 400);
         }
 
-        // Branch doesn't have text index, so use regex search
-        const query = {
+        let query = {
             $or: [
                 { name: { $regex: q, $options: "i" } },
-                { description: { $regex: q, $options: "i" } }
-            ]
+                { description: { $regex: q, $options: "i" } },
+            ],
         };
+
+        if (req.user.role !== "admin") {
+            query = {
+                $and: [
+                    query,
+                    {
+                        $or: [
+                            { ownerId: req.user.id },
+                            { "members.userId": req.user.id },
+                        ],
+                    },
+                ],
+            };
+        }
 
         const branches = await Branch.find(query)
             .skip((page - 1) * limit)

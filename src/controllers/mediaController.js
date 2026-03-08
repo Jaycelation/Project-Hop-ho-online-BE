@@ -1,24 +1,69 @@
 const Media = require("../models/MediaModel");
+const Branch = require("../models/BranchModel");
 const path = require("path");
 const fs = require("fs");
 const { success, error } = require("../utils/responseHandler");
 const logAudit = require("../utils/auditLogger");
 const securityGuard = require("../utils/securityGuard");
+const { getAccessibleBranchIds } = require("../middlewares/authMiddleware");
+const { hasBranchRole } = require("../utils/branchAccess");
+const { createMediaAccessToken, verifyMediaAccessToken } = require("../utils/securityConfig");
+
+const STORAGE_ROOT = path.resolve(__dirname, "../../storage");
+
+function resolveStoragePath(storagePath) {
+    if (!storagePath) return null;
+
+    const absolutePath = path.isAbsolute(storagePath)
+        ? path.resolve(storagePath)
+        : path.resolve(__dirname, "../../", storagePath);
+
+    if (absolutePath !== STORAGE_ROOT && !absolutePath.startsWith(`${STORAGE_ROOT}${path.sep}`)) {
+        return null;
+    }
+
+    return absolutePath;
+}
+
+function buildSignedStreamUrl(req, media) {
+    const baseUrl = `${req.protocol}://${req.get("host")}`;
+    const accessToken = createMediaAccessToken({
+        mediaId: media._id,
+        userId: req.user?._id || req.user?.id,
+        branchId: media.branchId,
+    });
+
+    return `${baseUrl}/api/media/stream/${media._id}?accessToken=${encodeURIComponent(accessToken)}`;
+}
 
 const formatMediaResponse = (req, m) => {
-    const baseUrl = `${req.protocol}://${req.get("host")}`;
-    const fileName = path.basename(m.storagePath);
-    const url = `${baseUrl}/storage/uploads/${fileName}`;
+    const safeStoragePath = resolveStoragePath(m.storagePath);
+    const fileName = safeStoragePath ? path.basename(safeStoragePath) : null;
+    const url = buildSignedStreamUrl(req, m);
 
     const obj = m.toObject();
     return {
         ...obj,
         id: obj._id,
-        url: url,
+        url,
+        streamUrl: url,
+        fileName,
         type: obj.kind,
-        title: obj.caption || obj.originalName
+        title: obj.caption || obj.originalName,
     };
 };
+
+async function canReadMediaWithUser(media, user) {
+    if (!user) return false;
+    if (!media?.branchId) return false;
+
+    const branch = await Branch.findById(media.branchId);
+    if (!branch || !hasBranchRole(branch, user, "viewer")) {
+        return false;
+    }
+
+    return securityGuard.checkPrivacy(media, user);
+}
 
 exports.listMedia = async (req, res, next) => {
     try {
@@ -26,8 +71,18 @@ exports.listMedia = async (req, res, next) => {
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 20;
 
-        const query = {};
-        if (branchId) query.branchId = branchId;
+        const accessibleBranchIds = await getAccessibleBranchIds(req.user, "viewer");
+        if (!accessibleBranchIds.length) {
+            return success(res, [], { page, limit, total: 0, totalBeforeFilter: 0, totalPages: 0 });
+        }
+
+        const query = { branchId: { $in: accessibleBranchIds } };
+        if (branchId) {
+            if (!accessibleBranchIds.includes(branchId)) {
+                return error(res, { code: "FORBIDDEN_BRANCH_ACCESS", message: "Access denied to this branch" }, 403);
+            }
+            query.branchId = branchId;
+        }
         if (personId) query.personId = personId;
         if (eventId) query.eventId = eventId;
         if (kind) query.kind = kind;
@@ -37,7 +92,6 @@ exports.listMedia = async (req, res, next) => {
             .limit(limit)
             .sort({ createdAt: -1 });
 
-        // Filter by privacy
         const filtered = [];
         for (const m of media) {
             const hasAccess = await securityGuard.checkPrivacy(m, req.user);
@@ -94,7 +148,6 @@ exports.uploadMedia = async (req, res, next) => {
 
         return success(res, formatMediaResponse(req, media), null, 201);
     } catch (err) {
-        // Cleanup file if DB insert fails
         if (req.file) {
             fs.unlink(req.file.path, () => { });
         }
@@ -123,13 +176,12 @@ exports.updateMedia = async (req, res, next) => {
         const originalMedia = await Media.findById(req.params.id);
         if (!originalMedia) return error(res, { code: "NOT_FOUND", message: "Media not found" }, 404);
 
-        // Write permission check
         const isUploader = originalMedia.uploadedBy && originalMedia.uploadedBy.toString() === req.user.id;
         const isAdmin = req.user.role === "admin";
 
         let isBranchEditorOrOwner = false;
         if (originalMedia.branchId) {
-            const branch = await require("../models/BranchModel").findById(originalMedia.branchId);
+            const branch = await Branch.findById(originalMedia.branchId);
             if (branch) {
                 const member = branch.members.find(m => m.userId.toString() === req.user.id);
                 if (branch.ownerId.toString() === req.user.id || (member && (member.roleInBranch === "editor" || member.roleInBranch === "owner"))) {
@@ -142,7 +194,6 @@ exports.updateMedia = async (req, res, next) => {
             return error(res, { code: "FORBIDDEN_PRIVATE_RESOURCE", message: "You do not have access to modify this media" }, 403);
         }
 
-        // Only allow safe fields to be updated
         const { caption, privacy, personId, eventId } = req.body;
         const updateFields = {};
         if (caption !== undefined) updateFields.caption = caption;
@@ -177,14 +228,12 @@ exports.deleteMedia = async (req, res, next) => {
         const media = await Media.findById(req.params.id);
         if (!media) return error(res, { code: "NOT_FOUND", message: "Media not found" }, 404);
 
-        // Write permission check
         const isUploader = media.uploadedBy && media.uploadedBy.toString() === req.user.id;
         const isAdmin = req.user.role === "admin";
 
-        // Let's assume branch owner/editor can also delete media in their branch
         let isBranchEditorOrOwner = false;
         if (media.branchId) {
-            const branch = await require("../models/BranchModel").findById(media.branchId);
+            const branch = await Branch.findById(media.branchId);
             if (branch) {
                 const member = branch.members.find(m => m.userId.toString() === req.user.id);
                 if (branch.ownerId.toString() === req.user.id || (member && (member.roleInBranch === "editor" || member.roleInBranch === "owner"))) {
@@ -197,9 +246,9 @@ exports.deleteMedia = async (req, res, next) => {
             return error(res, { code: "FORBIDDEN_PRIVATE_RESOURCE", message: "You do not have access to delete this media" }, 403);
         }
 
-        // Delete file from disk
-        if (fs.existsSync(media.storagePath)) {
-            fs.unlinkSync(media.storagePath);
+        const safeStoragePath = resolveStoragePath(media.storagePath);
+        if (safeStoragePath && fs.existsSync(safeStoragePath)) {
+            fs.unlinkSync(safeStoragePath);
         }
 
         await media.deleteOne();
@@ -224,13 +273,29 @@ exports.streamMedia = async (req, res, next) => {
         const media = await Media.findById(req.params.id);
         if (!media) return error(res, { code: "NOT_FOUND", message: "Media not found" }, 404);
 
-        // Privacy check
-        const hasAccess = await securityGuard.checkPrivacy(media, req.user);
-        if (!hasAccess) {
-            return error(res, { code: "FORBIDDEN_PRIVATE_RESOURCE", message: "You do not have access to this media" }, 403);
+        const accessToken = req.query.accessToken;
+        if (accessToken) {
+            try {
+                verifyMediaAccessToken(accessToken, media._id.toString());
+            } catch (tokenError) {
+                return error(res, { code: "AUTH_INVALID_MEDIA_TOKEN", message: tokenError.message || "Invalid media access token" }, 401);
+            }
+        } else {
+            if (!req.user) {
+                return error(res, { code: "AUTH_MISSING_TOKEN", message: "No token provided" }, 401);
+            }
+
+            const hasAccess = await canReadMediaWithUser(media, req.user);
+            if (!hasAccess) {
+                return error(res, { code: "FORBIDDEN_PRIVATE_RESOURCE", message: "You do not have access to this media" }, 403);
+            }
         }
 
-        const filePath = media.storagePath;
+        const filePath = resolveStoragePath(media.storagePath);
+        if (!filePath) {
+            return error(res, { code: "INVALID_STORAGE_PATH", message: "Invalid file storage path" }, 400);
+        }
+
         if (!fs.existsSync(filePath)) {
             return error(res, { code: "FILE_NOT_FOUND", message: "File missing on server" }, 404);
         }
@@ -238,7 +303,12 @@ exports.streamMedia = async (req, res, next) => {
         const stat = fs.statSync(filePath);
         const fileSize = stat.size;
 
-        // Range-based streaming for video
+        res.setHeader("Content-Type", media.mimeType);
+        res.setHeader("Cache-Control", "private, max-age=60");
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        res.setHeader("Accept-Ranges", "bytes");
+        res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(media.originalName)}"`);
+
         if (media.kind === "video" && req.headers.range) {
             const range = req.headers.range;
             const parts = range.replace(/bytes=/, "").split("-");
@@ -250,14 +320,12 @@ exports.streamMedia = async (req, res, next) => {
 
             res.writeHead(206, {
                 "Content-Range": `bytes ${start}-${end}/${fileSize}`,
-                "Accept-Ranges": "bytes",
                 "Content-Length": chunkSize,
                 "Content-Type": media.mimeType,
             });
 
             stream.pipe(res);
         } else {
-            // Full file response (images or video without range)
             res.writeHead(200, {
                 "Content-Length": fileSize,
                 "Content-Type": media.mimeType,
